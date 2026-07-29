@@ -17,8 +17,11 @@ class Equipo(Base):
     __tablename__ = "equipos"
 
     id = Column(Integer, primary_key=True)
-    radio_id = Column(String, unique=True, nullable=False, index=True)
-    radio_ip = Column(String, nullable=True)
+    # Al menos uno de radio_id/radio_ip siempre viene informado (validado en
+    # TelemetryIn) — ambos nullable acá porque un equipo puede llegar a
+    # persistirse habiendo recibido telemetría con uno solo de los dos.
+    radio_id = Column(String, unique=True, nullable=True, index=True)
+    radio_ip = Column(String, nullable=True, index=True)
     alias = Column(String, nullable=False)
     tipo = Column(String, nullable=True)  # handy | movil | base
     modelo = Column(String, nullable=True)

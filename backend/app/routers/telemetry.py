@@ -18,7 +18,12 @@ async def recibir_telemetria(payload: TelemetryIn, db: Session = Depends(get_db)
     if not -180 <= payload.lon <= 180:
         raise HTTPException(status_code=400, detail="lon fuera de rango válido (-180 a 180)")
 
-    equipo = db.query(Equipo).filter(Equipo.radio_id == payload.radio_id).first()
+    equipo = None
+    if payload.radio_id is not None:
+        equipo = db.query(Equipo).filter(Equipo.radio_id == payload.radio_id).first()
+    if equipo is None and payload.radio_ip is not None:
+        equipo = db.query(Equipo).filter(Equipo.radio_ip == payload.radio_ip).first()
+
     if equipo is None:
         equipo = Equipo(
             radio_id=payload.radio_id,
@@ -28,7 +33,13 @@ async def recibir_telemetria(payload: TelemetryIn, db: Session = Depends(get_db)
         db.add(equipo)
         db.flush()
     else:
-        equipo.radio_ip = payload.radio_ip
+        # Solo se pisa el campo que vino informado en este reporte puntual —
+        # si este envío solo trae uno de los dos, no se borra el otro que ya
+        # se conocía de un envío anterior.
+        if payload.radio_id is not None:
+            equipo.radio_id = payload.radio_id
+        if payload.radio_ip is not None:
+            equipo.radio_ip = payload.radio_ip
         equipo.alias = payload.radio_alias
 
     posicion = Posicion(
