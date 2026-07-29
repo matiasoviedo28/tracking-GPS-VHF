@@ -1,0 +1,52 @@
+services:
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      - database
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB}
+    ports:
+      - "${BACKEND_PORT}:8000"
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT}:80"
+
+  # sdr-decoder: placeholder. Lo implementa el equipo de decodificación por
+  # separado (ver sdr-decoder/README.md y ARQUITECTURA.md secciones 2 y 10).
+  # Pendiente antes de poder levantarlo contra hardware real:
+  #   - Passthrough del dongle SDR al contenedor, usando el identificador
+  #     fijo por regla udev definido en ARQUITECTURA.md sección 9
+  #     (ej. "devices: - /dev/sdr_bomberos:/dev/sdr_bomberos"), en vez del
+  #     path de bus/puerto USB crudo.
+  #   - Variables de entorno para apuntar al endpoint real de backend
+  #     (ver BACKEND_INTERNAL_URL en .env.example).
+  # sdr-decoder:
+  #   build: ./sdr-decoder
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - backend
+  #   devices:
+  #     - /dev/sdr_bomberos:/dev/sdr_bomberos
+  #   environment:
+  #     BACKEND_URL: ${BACKEND_INTERNAL_URL}
+
+volumes:
+  db_data:
