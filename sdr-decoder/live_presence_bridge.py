@@ -28,36 +28,48 @@ Uso:
 
 IMPORTANTE — calibración de frecuencia:
 El valor de PPM de abajo (FREQ_CORR_PPM) es el más reciente conocido al
-momento de escribir este script (ver INVESTIGACION_LRRP.md, Sesión 9:
-offset medido de -7000 Hz a 159.635 MHz). Está DOCUMENTADO que este offset
-varía durante el día (deriva térmica del cristal del dongle, ver sesiones
-7/8/9 — fue -6504, -6700 y -7000 Hz en 3 sesiones consecutivas). Si después
-de 60-90s de arrancado este script no reporta NINGÚN sync real, lo más
-probable es que haga falta recalibrar (repetir el barrido empírico de
-freq_corr descripto en la Sesión 8/9 sobre una grabación corta nueva) antes
-de seguir esperando a ciegas.
+momento de escribir este script (prueba end-to-end en vivo: offset medido de
+-7800 Hz a 159.635 MHz, convertido a ppm). Está DOCUMENTADO que este offset
+varía durante el día (deriva térmica del cristal del dongle — fue -6504,
+-6700, -7000 y -7800 Hz en sesiones/momentos consecutivos, ver
+INVESTIGACION_LRRP.md sesiones 7/8/9 y el resumen de la prueba end-to-end).
+Si después de 60-90s de arrancado este script no reporta NINGÚN sync real,
+avisa solo con un ⚠️ en la terminal — hace falta recalibrar: grabar ~40-90s
+de IQ crudo con `rtl_sdr` durante una transmisión real, y barrer valores de
+`freq_corr` con `iq_to_wav.py` + `dsd-fme` en modo archivo (offline) hasta
+encontrar el que maximice syncs reales, igual que se hizo para llegar a este
+valor. NO se puede recalibrar solo escuchando en vivo sin grabar primero —
+en modo SDR en vivo, dsd-fme no imprime nada útil para comparar valores de
+ppm uno por uno en tiempo real de forma práctica.
 """
 
+import json
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 
 # Sin esto, los print() de este script quedan en buffer de bloque al
 # correr con stdout redirigido a un pipe/archivo (no a una TTY) — el
 # usuario no vería nada "en vivo" en la terminal hasta que el buffer se
 # llenase o el proceso terminara, justo lo contrario de lo que se pide.
 sys.stdout.reconfigure(line_buffering=True)
-import urllib.request
-import json
-from datetime import datetime, timezone
 
 # --- Configuración de RF (revisar INVESTIGACION_LRRP.md antes de asumir) ---
 FRECUENCIA = "159.635M"  # downlink de la repetidora
 GANANCIA = "30"  # nominal, misma usada en todas las grabaciones de investigación
-FREQ_CORR_PPM = "-44"  # equivalente a los -7000 Hz medidos en la Sesión 9 (ver docstring)
+# Última calibración empírica confirmada (ver resumen de sesión): -7800 Hz a
+# 159.635 MHz, medido con una transmisión real durante esta misma sesión de
+# prueba end-to-end. NO asumir que sigue valiendo en la próxima sesión — ya
+# se documentó que deriva durante el día (fue -6504, -6700, -7000 y ahora
+# -7800 Hz en sesiones/momentos consecutivos).
+FREQ_CORR_PPM = "-49"
 BANDWIDTH_KHZ = "12"
 SQUELCH = "0"
 VOLUMEN = "2"
@@ -161,13 +173,27 @@ def main() -> None:
         ultimo_post[radio_id] = ahora
         return True
 
-    try:
+    # Hilo lector separado: en modo SDR en vivo, con el canal en silencio
+    # real, dsd-fme puede no imprimir NADA durante minutos (a diferencia del
+    # modo archivo, que sí "chatea" constantemente incluso sin señal). Si
+    # leyéramos las líneas directo en el loop principal con un simple
+    # `for linea in proc.stdout`, el chequeo de recalibración (que depende
+    # del reloj, no de que lleguen líneas) quedaría bloqueado indefinidamente
+    # esperando la próxima línea y nunca podría dispararse. Con un hilo que
+    # solo lee y encola, el loop principal puede hacer `queue.get(timeout=…)`
+    # y revisar el reloj aunque no llegue nada.
+    lineas = queue.Queue()
+
+    def leer_stdout():
         for linea_cruda in proc.stdout:
-            # Chequeo de recalibración: corre en CADA línea leída (haya o no
-            # matcheado algo), porque si nunca hay sync real, todas las
-            # líneas terminan en el "continue" del filtro de Color Code de
-            # abajo y este aviso nunca llegaría a ejecutarse si estuviera
-            # después de esos continue.
+            lineas.put(linea_cruda)
+        lineas.put(None)  # centinela: el proceso cerró su stdout
+
+    hilo_lector = threading.Thread(target=leer_stdout, daemon=True)
+    hilo_lector.start()
+
+    try:
+        while True:
             if (
                 not aviso_emitido
                 and ultimo_sync_ok is None
@@ -181,6 +207,15 @@ def main() -> None:
                     flush=True,
                 )
                 aviso_emitido = True
+
+            try:
+                linea_cruda = lineas.get(timeout=1)
+            except queue.Empty:
+                continue  # nada nuevo todavía — vuelve arriba a re-chequear el reloj
+
+            if linea_cruda is None:
+                print("dsd-fme cerró su salida (¿se cayó el proceso o el dongle?).", flush=True)
+                break
 
             linea = strip_ansi(linea_cruda).strip()
             if not linea:
