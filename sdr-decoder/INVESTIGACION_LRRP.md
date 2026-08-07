@@ -654,3 +654,77 @@ El PTT del Hytera (t≈317s, cola del archivo) no produjo ningún contenido de v
 3. Investigar por qué el PTT de Base Guardia (t≈132s) no dejó ningún rastro esta vez, a diferencia de la sesión 7 — variable de señal puntual, o el PTT fue demasiado corto.
 4. Repetir el intento de captar un burst de datos de Source=1001, ahora que confirmamos que la activación de emergencia por sí sola no lo dispara — considerar otros triggers (ej. un "check-in" manual de posición si el HT lo permite, o simplemente más ventanas de tiempo de espera sin ninguna acción, para ver si la Base Guardia repite su burst periódicamente y así confirmar/descartar que sea un evento automático recurrente).
 5. Sigue pendiente el script puente hacia el backend — sigue sin haber ninguna decodificación LRRP confirmada de ningún radio todavía.
+
+---
+
+## Sesión 9 — Grabación pasiva de 15 minutos: confirmado que el burst de la Base Guardia es ARS, no LRRP
+
+### Contexto
+Sesión puramente pasiva — sin ninguna acción coordinada del usuario sobre los handys. Objetivo: usar una ventana larga (15 min) para buscar repeticiones del burst de datos de la Base Guardia (Source=1000, Target 64250, visto en la sesión 7) y estimar si es periódico.
+
+### Grabación
+```bash
+timeout 900 rtl_sdr -f 159635000 -s 240000 -g 30 iq_159635_20260807_191404.cu8
+```
+Inicio 19:14:04. Terminación limpia (898,94s, sin colgarse).
+
+**Incidente operativo**: la máquina del usuario se tildó y debió apagarse de forma forzada durante el análisis posterior a la grabación. Se verificó la integridad completa antes de continuar: el archivo de grabación ya estaba cerrado y escrito en disco antes del crash (mismo tamaño, mismo histograma exacto tras el reinicio), el dongle se detectó normalmente, y no quedó ningún proceso colgado. **Sin pérdida de datos.**
+
+### Offset de frecuencia: sigue derivando, ahora -7000 Hz
+Perfil de potencia (referencial, no de búsqueda) sobre el archivo completo: solo una ventana con actividad clara, t≈270-274s. Barrido empírico de `freq_corr` sobre esa ventana (método estándar desde la sesión 8): valores probados de -8000 a +8000 Hz, óptimo en **-7000 Hz** (140 syncs vs. 0 en la mayoría de los otros valores). **Tercera sesión consecutiva con un offset distinto** (-6504 → -6700 → -7000, sesiones 7-8-9), tendencia monótona creciente en magnitud — posible deriva térmica del cristal del dongle a lo largo del día. Se reconfirma como estándar: medir con barrido empírico en cada sesión, nunca asumir el valor anterior.
+
+### Escaneo lineal completo (898,9s) — resultado: 142 syncs, todo concentrado en una única ráfaga
+| Tipo | Cantidad |
+|---|---|
+| IDLE (CC=01) | 113 |
+| CSBK (CC=01) | 16 |
+| DATA (Header, CC=01) | 2 |
+| R12U (bloque, CC=01) | 1 |
+
+**Localización temporal** (cortando en tramos de 60s, método estándar de esta sesión por no haber timestamps en vivo): de los 15 tramos, **solo el tramo t=240-300s tiene contenido** (140 de los 142 syncs); el resto del archivo (t=0-240s y t=300-898s, prácticamente los 15 minutos completos) está en silencio real, salvo 2 blips de ruido sin contenido (un `CACH/Burst FEC ERR` aislado en t≈300-360s y otro en t≈480-540s, sin Color Code ni payload — ruido, no señal real). **Posición precisa de la ráfaga: t≈270-274s ≈ 19:18:34-19:18:38 hora real.**
+
+### 🎯 HALLAZGO PRINCIPAL — confirmado por el propio parser de dsd-fme: el burst de la Base Guardia es ARS, no LRRP
+
+La ráfaga completa (16 preámbulos CSBK + 2 headers de datos + 1 bloque) se reensambló correctamente esta vez, y el parser MNIS de `dsd-fme` etiquetó el mensaje explícitamente:
+```
+Motorola Network Interface Service Header (MNIS);
+SRC(MNIS): 00001000;
+DST(MNIS): 00064250; MNIS ARS;   ???: 3BB7
+UTF8 Text: _-- -1000__SR--
+Slot 1 - Multi Block PDU Message
+ 1F100201333BB70009F02004
+ 3130303000005352CB9F0000
+```
+
+**Verificado contra el código fuente** (`dmr_block.c:1294`): `mnis_type == 0x33` imprime literalmente `"MNIS ARS"` — un código de tipo MNIS **distinto y mutuamente excluyente** de `LRRP` (`0x11`) y `LOCN` (`0x01`, línea 1292-1293). Es decir: **esto no es una hipótesis — el propio parser de dsd-fme identificó el mensaje como ARS (Automatic Registration Service)**, no como reporte de posición. Esto cierra definitivamente la pregunta abierta al final de la sesión 7 ("¿es ARS/registro, o podría ser LRRP?").
+
+**Comparación byte a byte con el burst de la sesión 7** (mismo Source=1000, Target=64250):
+- Header SAP09: `02 90 00 FA FA 00 03 E8 82 00 25 2B` — **idéntico byte a byte** al de la sesión 7.
+- Bloque de datos: `20 04 31 30 30 30 00 00 [XX][XX][XX][XX]` — **primeros 8 bytes idénticos** (incluye el ASCII "1000"), solo cambian los últimos 4 (consistentes con ruido/CRC variable en un bloque sin checksum real, ver salvedad de la sesión 7).
+- **Nuevo esta sesión**: un segundo header de datos, `Slot 1 Data Header - Extended - SAP 01 [Moto NET] - MFID 10 [Moto]`, no visto en la sesión 7 — es la cabecera específica de MNIS (motivo por el cual esta vez el mensaje se reensambló y clasificó completo, mientras que en la sesión 7 solo se había visto la mitad de la secuencia).
+
+**Conclusión**: el mensaje de la Base Guardia es un **registro/keepalive ARS estándar de MOTOTRBO**, reproducible y con contenido casi estático — no es, y estructuralmente no puede ser, el canal por el que viaja LRRP/GPS. La búsqueda de LRRP debe seguir enfocada en otro tipo de mensaje (probablemente `mnis_type=0x11`), no en este.
+
+### Periodicidad — no se repitió dentro de esta sesión, pero se puede acotar el intervalo combinando todas las sesiones
+
+Dentro de los 898s de esta grabación, el burst apareció **una sola vez** — no se pudo medir un intervalo directamente. Combinando con las sesiones anteriores (todas en la misma repetidora/sistema):
+
+| Sesión | Ventana observada | Duración | Ocurrencias |
+|---|---|---|---|
+| 7 | 18:19:59-18:23:55 | 236s | 1 |
+| 8 (1er intento) | 17:45:55-17:51:57 (*) | 362s | 0 |
+| 8 (2do intento) | 19:00:02-19:05:28 | 326s | 0 |
+| 9 | 19:14:04-19:29:04 | 899s | 1 |
+
+*(el horario exacto de la sesión 8/1er intento está tomado del nombre de archivo `iq_159635_20260807_184555.cu8`; ver sesión 8 para el detalle.)*
+
+**Cero ocurrencias en dos ventanas separadas de ~5-6 minutos cada una (sesión 8)** sugiere que el intervalo, si es periódico, es **mayor a ese orden de magnitud** (no se ve un registro cada pocos minutos). La sesión 9 (una sola ocurrencia en 15 minutos, con silencio total antes y después) es consistente con un intervalo bastante más largo — **posiblemente del orden de 20-60+ minutos, o bien un evento no estrictamente periódico** (podría dispararse por otra condición: reinicio del equipo, cambio de canal, roaming, o un intervalo largo de ARS configurado en el CPS de la Base Guardia). **No se puede fijar un valor exacto con los datos disponibles** — se necesitarían 2+ ocurrencias dentro de una misma grabación continua para medir el intervalo real, cosa que no ocurrió en ninguna sesión hasta ahora.
+
+### Otros Source ID con tráfico de datos — ninguno encontrado
+En los 16 CSBK + 2 DATA + 1 R12U de esta sesión, **el único Source presente es 1000 (Base Guardia)**. Ningún otro equipo del sistema (Matías/1001, 1002, u otros no identificados) generó tráfico de datos durante esta ventana pasiva de 15 minutos — consistente con que nadie estaba operando activamente los handys.
+
+### Próximos pasos (Sesión 9)
+1. **La pregunta original del proyecto (captar LRRP) sigue abierta** — el hallazgo de esta sesión resuelve una rama secundaria (qué es el burst de la Base Guardia) pero no avanza directamente el objetivo principal.
+2. Dado que ARS queda confirmado como un mensaje distinto de LRRP, y que activar emergencia/rastreo en Matías (sesión 8) no disparó ningún burst de datos, **reconsiderar si existe algún trigger real para que un handy individual transmita LRRP** — podría no ser algo que el propio HT decida enviar espontáneamente, sino algo que se dispare por una solicitud activa desde el lado NAI-D/aplicación (volviendo, en cierto sentido, a la línea de investigación de la sesión 1, ahora con más contexto de protocolo).
+3. Si se quiere seguir la pista de periodicidad del ARS, haría falta una grabación continua mucho más larga (order de 1+ hora) para capturar 2+ repeticiones y medir el intervalo real — no es prioritario para el objetivo de LRRP, pero quedaría como dato de caracterización del sistema.
+4. Sigue pendiente el script puente hacia el backend — sigue sin haber ninguna decodificación LRRP confirmada de ningún radio todavía.
