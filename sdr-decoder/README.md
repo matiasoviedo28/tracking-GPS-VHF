@@ -5,6 +5,9 @@ Servicio pendiente de implementación, a cargo del equipo de decodificación
 `Dockerfile` mínimo para que `docker-compose.yml` pueda referenciarlo sin
 romper el resto del stack.
 
+Investigación de captura GPS/LRRP en curso (sesiones de RF con SDR, previa a
+la implementación de este servicio): ver `INVESTIGACION_LRRP.md`.
+
 Responsabilidades futuras de este servicio (fuera del alcance de esta sesión):
 
 - Captura de señal DMR vía SDR y decodificación del protocolo LRRP.
