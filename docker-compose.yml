@@ -24,6 +24,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB}
+      PRESENCE_ONLINE_THRESHOLD_SECONDS: ${PRESENCE_ONLINE_THRESHOLD_SECONDS:-300}
     ports:
       - "${BACKEND_PORT}:8000"
 
