@@ -64,6 +64,14 @@ VOLUMEN = "2"
 DEVICE_INDEX = "0"
 
 DSD_FME_CMD = [
+    # stdbuf -oL -eL: fuerza line-buffering en el proceso hijo. Sin esto,
+    # dsd-fme bufferiza su salida por bloque al detectar que no está
+    # conectado a una TTY (comportamiento normal de glibc) — el resultado es
+    # que este script no ve NADA (ni el banner de arranque) durante minutos,
+    # aunque dsd-fme esté decodificando bien del otro lado.
+    "stdbuf",
+    "-oL",
+    "-eL",
     "dsd-fme",
     "-fs",
     "-i",
