@@ -42,6 +42,11 @@ async def recibir_telemetria(payload: TelemetryIn, db: Session = Depends(get_db)
             equipo.radio_ip = payload.radio_ip
         equipo.alias = payload.radio_alias
 
+    # Una posición también es evidencia de que el equipo está "vivo" —
+    # se actualiza ultimo_visto igual que en /api/presence, pero sin tocar
+    # ultimo_evento (una posición no es un evento de voz/emergencia/ars).
+    equipo.ultimo_visto = payload.timestamp
+
     posicion = Posicion(
         equipo_id=equipo.id,
         lat=payload.lat,
@@ -58,6 +63,7 @@ async def recibir_telemetria(payload: TelemetryIn, db: Session = Depends(get_db)
 
     await manager.broadcast(
         {
+            "type": "position_update",
             "equipo_id": equipo.id,
             "radio_id": equipo.radio_id,
             "radio_alias": equipo.alias,

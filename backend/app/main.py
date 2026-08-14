@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import Base, engine
-from app.routers import telemetry
+from app.routers import equipos, presence, telemetry
 
 Base.metadata.create_all(bind=engine)
 
@@ -16,6 +16,8 @@ app.add_middleware(
 )
 
 app.include_router(telemetry.router)
+app.include_router(presence.router)
+app.include_router(equipos.router)
 
 
 @app.get("/health")

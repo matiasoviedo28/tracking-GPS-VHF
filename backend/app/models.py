@@ -26,6 +26,13 @@ class Equipo(Base):
     tipo = Column(String, nullable=True)  # handy | movil | base
     modelo = Column(String, nullable=True)
     activo = Column(Boolean, nullable=False, default=True)
+    # Presencia: última vez que se decodificó CUALQUIER burst válido de este
+    # equipo (voz, emergencia, ARS, o una posición) — no confundir con la
+    # última posición GPS conocida (eso vive en Posicion). ultimo_evento
+    # queda None cuando el último "visto" vino de una posición, no de un
+    # evento de presencia con tipo propio.
+    ultimo_visto = Column(DateTime(timezone=True), nullable=True)
+    ultimo_evento = Column(String, nullable=True)  # voz | emergencia | ars | gps
 
     posiciones = relationship("Posicion", back_populates="equipo")
 
