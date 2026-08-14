@@ -8,90 +8,104 @@ Cuando sdr-decoder se containerice de verdad, esta lógica se reemplaza por
 la implementación real de decodificación (a cargo de Julián, ver
 INVESTIGACION_LRRP.md), no por este script.
 
-Qué hace:
-1. Corre `dsd-fme` en modo SDR EN VIVO (no archivo) escuchando el downlink
-   de la repetidora (159.635 MHz, Color Code 1).
-2. Lee su salida línea por línea en tiempo real (no espera a que termine).
-3. Detecta bursts válidos (Color Code=01) de voz normal, emergencia, o
-   registro ARS, según los patrones confirmados en INVESTIGACION_LRRP.md
-   (sesiones 7-9).
-4. Por cada evento nuevo (con rate-limit de 5s por radio_id), hace POST a
-   /api/presence.
+Qué hace (reescrito en la Sesión 12 — ver INVESTIGACION_LRRP.md):
+1. Graba un bloque corto (BLOCK_SECONDS) de IQ crudo con `rtl_sdr`,
+   escuchando el downlink de la repetidora (159.635 MHz).
+2. Convierte ese bloque a WAV demodulado con `iq_to_wav.py`
+   (~/sdr_dmr_test/), aplicando la corrección de frecuencia confirmada.
+3. Corre `dsd-fme` en modo ARCHIVO (no en vivo) sobre ese WAV.
+4. Parsea la salida completa del bloque buscando bursts válidos
+   (Color Code=01) de voz, emergencia, ARS, o LRRP/GPS (ver Sesión 16).
+5. Postea a /api/presence lo que se haya detectado (con rate-limit de 5s
+   por radio_id).
+6. Guarda a disco el texto crudo completo de `dsd-fme` de este bloque
+   (ver Sesión 16 — corrige el punto ciego de auditoría encontrado en el
+   re-análisis retroactivo: antes se descartaba en memoria y no había
+   forma de revisar qué pasó realmente en cada bloque).
+7. Borra los archivos temporales de IQ/WAV del bloque y repite
+   indefinidamente (los logs crudos de texto NO se borran, ver punto 6).
 
-Requiere: dsd-fme compilado en el PATH (ver ~/sdr_dmr_test/), dongle RTL-SDR
-libre, y el backend de tracking-GPS-VHF corriendo (docker compose up -d
-backend).
+Sesión 16 — detección de LRRP/GPS agregada: hasta la sesión 15 las regex
+solo buscaban voz/emergencia/ARS — nunca los strings que `dsd-fme` imprime
+si reconoce un token real de LRRP (`dmr_lrrp()` en `dmr_pdu.c`, ver
+INVESTIGACION_LRRP.md, investigación de código). Ahora también se busca
+"LRRP SRC:", "MNIS LRRP", "MNIS LOCN", "Immediate Location Request", y
+"Triggered Location" en CADA línea del bloque (sin el filtro de Color
+Code=01 que se usa para voz/ARS — a diferencia de esos, un hallazgo de
+LRRP es tan raro e importante que preferimos el riesgo de un falso
+positivo antes que perder uno real por un gate demasiado estricto).
+
+Por qué este diseño y no `dsd-fme -i rtl:...` en vivo (versión anterior):
+la Sesión 11 encontró que el modo SDR en vivo de `dsd-fme` usa un pipeline
+interno de muestreo completamente distinto (1.008 MS/s, oversampling 84x)
+del pipeline offline (240 kS/s + `iq_to_wav.py`) que se validó una y otra
+vez desde la Sesión 7 — el mismo valor de corrección de frecuencia que
+sincroniza perfecto offline no sincronizaba NUNCA en modo vivo, con
+transmisiones reales confirmadas de sobra. Este rediseño usa exclusivamente
+el pipeline que sí está probado, a costa de latencia (el tamaño del bloque,
+ver BLOCK_SECONDS) en vez de detección instantánea.
+
+Requiere: `rtl_sdr` y `dsd-fme` en el PATH, `~/sdr_dmr_test/iq_to_wav.py`
+presente (numpy + scipy instalados), dongle RTL-SDR libre, y el backend de
+tracking-GPS-VHF corriendo (docker compose up -d backend).
 
 Uso:
     python3 live_presence_bridge.py
     BACKEND_URL=http://localhost:8000 python3 live_presence_bridge.py
 
 IMPORTANTE — calibración de frecuencia:
-El valor de PPM de abajo (FREQ_CORR_PPM) es el más reciente conocido al
-momento de escribir este script (prueba end-to-end en vivo: offset medido de
--7800 Hz a 159.635 MHz, convertido a ppm). Está DOCUMENTADO que este offset
-varía durante el día (deriva térmica del cristal del dongle — fue -6504,
--6700, -7000 y -7800 Hz en sesiones/momentos consecutivos, ver
-INVESTIGACION_LRRP.md sesiones 7/8/9 y el resumen de la prueba end-to-end).
-Si después de 60-90s de arrancado este script no reporta NINGÚN sync real,
-avisa solo con un ⚠️ en la terminal — hace falta recalibrar: grabar ~40-90s
-de IQ crudo con `rtl_sdr` durante una transmisión real, y barrer valores de
-`freq_corr` con `iq_to_wav.py` + `dsd-fme` en modo archivo (offline) hasta
-encontrar el que maximice syncs reales, igual que se hizo para llegar a este
-valor. NO se puede recalibrar solo escuchando en vivo sin grabar primero —
-en modo SDR en vivo, dsd-fme no imprime nada útil para comparar valores de
-ppm uno por uno en tiempo real de forma práctica.
+FREQ_CORR_HZ de abajo es el valor más reciente confirmado (Sesión 16,
+sweep fino sobre grabación real: -7600 Hz a 159.635 MHz, 174 syncs / 165
+Color Code=01 sobre una transmisión real — mejor que -8000, -8200, -7800
+y -7500 Hz probados en el mismo sweep). Documentado que este offset
+deriva durante el día (fue -6504, -6700, -7000, -7800, -7500 y ahora
+-7600 Hz en sesiones/momentos consecutivos) — si después de varios
+minutos ningún bloque logra sync con Color Code=01 (este script avisa
+solo con un ⚠️), hace falta recalibrar: grabar ~40-90s de IQ crudo con
+`rtl_sdr` durante una transmisión real y barrer valores de `freq_corr`
+con `iq_to_wav.py` + `dsd-fme` en modo archivo hasta encontrar el que
+maximice syncs reales, igual que en sesiones anteriores. Antes de
+sospechar de la calibración, verificar que la antena esté conectada (la
+Sesión 11 y la Sesión 16 perdieron tiempo en eso).
 """
 
 import json
 import os
-import queue
 import re
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
-# Sin esto, los print() de este script quedan en buffer de bloque al
-# correr con stdout redirigido a un pipe/archivo (no a una TTY) — el
-# usuario no vería nada "en vivo" en la terminal hasta que el buffer se
-# llenase o el proceso terminara, justo lo contrario de lo que se pide.
 sys.stdout.reconfigure(line_buffering=True)
 
 # --- Configuración de RF (revisar INVESTIGACION_LRRP.md antes de asumir) ---
-FRECUENCIA = "159.635M"  # downlink de la repetidora
+FRECUENCIA_HZ = 159635000  # downlink de la repetidora
+SAMPLE_RATE_HZ = 240000  # mismo usado en todas las grabaciones de investigación
 GANANCIA = "30"  # nominal, misma usada en todas las grabaciones de investigación
-# Última calibración empírica confirmada (ver resumen de sesión): -7800 Hz a
-# 159.635 MHz, medido con una transmisión real durante esta misma sesión de
-# prueba end-to-end. NO asumir que sigue valiendo en la próxima sesión — ya
-# se documentó que deriva durante el día (fue -6504, -6700, -7000 y ahora
-# -7800 Hz en sesiones/momentos consecutivos).
-FREQ_CORR_PPM = "-49"
-BANDWIDTH_KHZ = "12"
-SQUELCH = "0"
-VOLUMEN = "2"
+# Última calibración empírica confirmada (Sesión 16): -7600 Hz a 159.635 MHz,
+# NO asumir que sigue valiendo la próxima sesión (ver docstring).
+FREQ_CORR_HZ = -7600
 DEVICE_INDEX = "0"
 
-DSD_FME_CMD = [
-    # stdbuf -oL -eL: fuerza line-buffering en el proceso hijo. Sin esto,
-    # dsd-fme bufferiza su salida por bloque al detectar que no está
-    # conectado a una TTY (comportamiento normal de glibc) — el resultado es
-    # que este script no ve NADA (ni el banner de arranque) durante minutos,
-    # aunque dsd-fme esté decodificando bien del otro lado.
-    "stdbuf",
-    "-oL",
-    "-eL",
-    "dsd-fme",
-    "-fs",
-    "-i",
-    f"rtl:{DEVICE_INDEX}:{FRECUENCIA}:{GANANCIA}:{FREQ_CORR_PPM}:{BANDWIDTH_KHZ}:{SQUELCH}:{VOLUMEN}",
-    "-Z",
-    "-o",
-    "null",
-]
+BLOCK_SECONDS = 12  # duración de cada bloque grabado (10-15s sugerido)
+N_SAMPLES = BLOCK_SECONDS * SAMPLE_RATE_HZ
+
+# Scripts/binarios externos al repo (ver docstring — dev-only, paths fijos
+# a la máquina de investigación, no portables).
+IQ_TO_WAV_SCRIPT = str(Path.home() / "sdr_dmr_test" / "iq_to_wav.py")
+SCRATCH_DIR = Path.home() / "sdr_dmr_test" / "bridge_blocks"
+
+# Sesión 16: logs crudos de dsd-fme por bloque, uno por archivo — a
+# diferencia de SCRATCH_DIR (IQ/WAV, se borran siempre), esto NO se borra
+# nunca automáticamente, es justamente lo que faltaba para poder auditar
+# retroactivamente. En una corrida muy larga esto acumula un archivo por
+# bloque (~1 cada 14s) — sin limpieza automática a propósito, revisar y
+# limpiar a mano si hace falta liberar espacio.
+LOGS_DIR = Path(__file__).resolve().parent / "logs_sesion16"
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 PRESENCE_ENDPOINT = f"{BACKEND_URL}/api/presence"
@@ -105,13 +119,20 @@ ALIAS_CONOCIDOS = {
 }
 
 RATE_LIMIT_SEG = 5
-AVISO_SIN_SYNC_SEG = 75  # ver docstring — aviso de recalibración
+BLOQUES_SIN_SYNC_PARA_AVISO = 5  # ~5 bloques de 12s ≈ 1 minuto sin ningún sync
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 SYNC_CC_RE = re.compile(r"Sync:\s*\+?DMR.*\|\s*Color Code=(\S+)")
 SRC_VOZ_RE = re.compile(r"SRC=(\d+).*?(Group Emergency Call|Group Call)")
 MNIS_SRC_RE = re.compile(r"SRC\(MNIS\):\s*0*(\d+)")
 MNIS_ARS_RE = re.compile(r"MNIS ARS")
+
+# Sesión 16 — strings confirmados en dmr_pdu.c/dmr_block.c que dsd-fme
+# imprime SOLO si reconoce un token real de LRRP/LOCN (ver investigación de
+# código en INVESTIGACION_LRRP.md). Nunca se buscaron antes de esta sesión.
+LRRP_GPS_RE = re.compile(
+    r"LRRP SRC:|MNIS LRRP|MNIS LOCN|Immediate Location Request|Triggered Location"
+)
 
 
 def strip_ansi(linea: str) -> str:
@@ -138,130 +159,241 @@ def enviar_presencia(radio_id: str, evento: str) -> None:
     etiqueta = alias or radio_id
     try:
         with urllib.request.urlopen(request, timeout=5) as resp:
-            print(f"[{etiqueta}] evento={evento} -> POST {resp.status}", flush=True)
+            print(f"  [{etiqueta}] evento={evento} -> POST {resp.status}", flush=True)
     except urllib.error.HTTPError as exc:
         detalle = exc.read().decode("utf-8", "replace")
-        print(f"[{etiqueta}] evento={evento} -> ERROR {exc.code}: {detalle}", flush=True)
+        print(f"  [{etiqueta}] evento={evento} -> ERROR {exc.code}: {detalle}", flush=True)
     except urllib.error.URLError as exc:
-        print(f"[{etiqueta}] evento={evento} -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
+        print(f"  [{etiqueta}] evento={evento} -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
+
+
+def parsear_bloque(texto: str):
+    """Recorre la salida completa de dsd-fme sobre un bloque y devuelve
+    (eventos, hubo_sync_cc01, hallazgos_lrrp).
+
+    eventos: [(radio_id, evento), ...] para voz/emergencia/ars — misma
+    lógica de estado secuencial (solo confiar en SRC=/MNIS si viene justo
+    después de un header Color Code=01) que la versión en vivo anterior,
+    ahora sobre texto ya completo en vez de una cola de líneas en tiempo
+    real.
+
+    hallazgos_lrrp: [(radio_id_o_None, linea_completa), ...] para
+    LRRP/GPS — Sesión 16. A propósito NO se filtra por Color Code=01 como
+    el resto: un hallazgo de LRRP es tan raro e importante que preferimos
+    el riesgo de un falso positivo antes que perder uno real por un gate
+    demasiado estricto."""
+    eventos = []
+    hallazgos_lrrp = []
+    ultima_cc = None
+    mnis_src_pendiente = None
+    hubo_sync_cc01 = False
+
+    for linea_cruda in texto.splitlines():
+        linea = strip_ansi(linea_cruda).strip()
+        if not linea:
+            continue
+
+        if LRRP_GPS_RE.search(linea):
+            hallazgos_lrrp.append((mnis_src_pendiente, linea))
+
+        m = SYNC_CC_RE.search(linea)
+        if m:
+            ultima_cc = m.group(1)
+            if ultima_cc == "01":
+                hubo_sync_cc01 = True
+            continue
+
+        if ultima_cc != "01":
+            continue
+
+        m = SRC_VOZ_RE.search(linea)
+        if m:
+            radio_id, tipo_llamada = m.group(1), m.group(2)
+            evento = "emergencia" if "Emergency" in tipo_llamada else "voz"
+            eventos.append((radio_id, evento))
+            continue
+
+        m = MNIS_SRC_RE.search(linea)
+        if m:
+            mnis_src_pendiente = m.group(1)
+            continue
+
+        if MNIS_ARS_RE.search(linea) and mnis_src_pendiente is not None:
+            eventos.append((mnis_src_pendiente, "ars"))
+            mnis_src_pendiente = None
+            continue
+
+    return eventos, hubo_sync_cc01, hallazgos_lrrp
+
+
+def grabar_bloque(iq_path: Path) -> bool:
+    """True si rtl_sdr terminó ok y el archivo tiene contenido."""
+    cmd = [
+        "rtl_sdr",
+        "-f", str(FRECUENCIA_HZ),
+        "-s", str(SAMPLE_RATE_HZ),
+        "-g", GANANCIA,
+        "-d", DEVICE_INDEX,
+        "-n", str(N_SAMPLES),
+        str(iq_path),
+    ]
+    try:
+        subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=BLOCK_SECONDS + 20, check=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"  ERROR grabando bloque con rtl_sdr: {exc}", flush=True)
+        return False
+    return iq_path.exists() and iq_path.stat().st_size > 0
+
+
+def convertir_bloque(iq_path: Path, wav_path: Path) -> bool:
+    cmd = [
+        "python3", IQ_TO_WAV_SCRIPT,
+        str(iq_path), str(wav_path), str(SAMPLE_RATE_HZ), str(FREQ_CORR_HZ),
+    ]
+    try:
+        subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30, check=True,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"  ERROR convirtiendo bloque con iq_to_wav.py: {exc}", flush=True)
+        return False
+    return wav_path.exists() and wav_path.stat().st_size > 0
+
+
+def decodificar_bloque(wav_path: Path) -> str:
+    cmd = ["dsd-fme", "-fs", "-i", str(wav_path), "-s", "48000", "-Z", "-o", "null"]
+    try:
+        resultado = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=30,
+        )
+        return resultado.stdout
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"  ERROR corriendo dsd-fme sobre el bloque: {exc}", flush=True)
+        return ""
+
+
+def guardar_log_crudo(indice: int, ts: str, salida: str) -> None:
+    """Sesión 16 — guarda el texto crudo completo de dsd-fme para este
+    bloque, con separadores claros, para poder re-auditar después (esto es
+    justamente lo que faltaba antes de esta sesión, ver
+    INVESTIGACION_LRRP.md, re-análisis retroactivo)."""
+    log_path = LOGS_DIR / f"bloque_{indice:04d}_{ts}.log"
+    try:
+        with open(log_path, "w") as f:
+            f.write(f"=== Bloque {indice} — {datetime.now().isoformat()} ===\n")
+            f.write(salida)
+            f.write(f"\n=== fin bloque {indice} ===\n")
+    except OSError as exc:
+        print(f"  ERROR guardando log crudo del bloque {indice}: {exc}", flush=True)
+
+
+def procesar_un_bloque(indice: int, ultimo_post: dict) -> bool:
+    """Devuelve True si hubo sync con Color Code=01 en este bloque (para
+    el conteo de bloques consecutivos sin sync)."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    iq_path = SCRATCH_DIR / f"block_{ts}.cu8"
+    wav_path = SCRATCH_DIR / f"block_{ts}.wav"
+
+    t0 = time.monotonic()
+    try:
+        if not grabar_bloque(iq_path):
+            print(f"[bloque {indice}] grabación falló o vino vacía, sigo con el próximo.", flush=True)
+            return False
+
+        if not convertir_bloque(iq_path, wav_path):
+            print(f"[bloque {indice}] conversión falló, sigo con el próximo.", flush=True)
+            return False
+
+        salida = decodificar_bloque(wav_path)
+        guardar_log_crudo(indice, ts, salida)
+        eventos, hubo_sync, hallazgos_lrrp = parsear_bloque(salida)
+        duracion = time.monotonic() - t0
+
+        if hallazgos_lrrp:
+            print("\n" + "#" * 70, flush=True)
+            print(f"### 🚨 POSIBLE LRRP/GPS DETECTADO — BLOQUE {indice} 🚨", flush=True)
+            print("#" * 70, flush=True)
+            for radio_id, linea in hallazgos_lrrp:
+                print(f"### radio_id={radio_id or 'DESCONOCIDO'} | línea: {linea}", flush=True)
+            print(f"### log crudo completo guardado en: logs_sesion16/bloque_{indice:04d}_{ts}.log", flush=True)
+            print("#" * 70 + "\n", flush=True)
+            for radio_id, _linea in hallazgos_lrrp:
+                if radio_id is None:
+                    print("  (radio_id desconocido para este hallazgo, no se postea — revisar el log crudo a mano)", flush=True)
+                    continue
+                ahora = time.monotonic()
+                if ahora - ultimo_post.get(radio_id, 0) < RATE_LIMIT_SEG:
+                    print(f"  [{radio_id}] evento=gps -> rate-limited, no se re-postea", flush=True)
+                    continue
+                ultimo_post[radio_id] = ahora
+                enviar_presencia(radio_id, "gps")
+
+        if not eventos:
+            estado = "sync CC=01 pero sin evento reconocido" if hubo_sync else "sin actividad"
+            print(f"[bloque {indice}] {estado} ({duracion:.1f}s de procesamiento). Normal en silencio de radio.", flush=True)
+        else:
+            print(f"[bloque {indice}] {len(eventos)} evento(s) detectado(s) ({duracion:.1f}s de procesamiento):", flush=True)
+            vistos = set()
+            for radio_id, evento in eventos:
+                clave = (radio_id, evento)
+                if clave in vistos:
+                    continue
+                vistos.add(clave)
+                ahora = time.monotonic()
+                if ahora - ultimo_post.get(radio_id, 0) < RATE_LIMIT_SEG:
+                    print(f"  [{radio_id}] evento={evento} -> rate-limited, no se re-postea", flush=True)
+                    continue
+                ultimo_post[radio_id] = ahora
+                enviar_presencia(radio_id, evento)
+
+        return hubo_sync
+    finally:
+        # Limpieza del bloque, pase lo que pase (no acumular archivos IQ/WAV
+        # — el log crudo de texto, guardado arriba, NO se borra).
+        iq_path.unlink(missing_ok=True)
+        wav_path.unlink(missing_ok=True)
 
 
 def main() -> None:
-    print("Comando dsd-fme:", " ".join(DSD_FME_CMD))
-    print(f"POSTeando eventos a: {PRESENCE_ENDPOINT}")
-    print("Ctrl+C para cortar.\n")
+    SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    proc = subprocess.Popen(
-        DSD_FME_CMD,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,  # dsd-fme imprime por stderr, lo mergeamos
-        text=True,
-        bufsize=1,
-    )
+    print(f"Bloques de {BLOCK_SECONDS}s a {FRECUENCIA_HZ/1e6} MHz, freq_corr={FREQ_CORR_HZ:+d} Hz, gain={GANANCIA}", flush=True)
+    print(f"POSTeando eventos a: {PRESENCE_ENDPOINT}", flush=True)
+    print(f"Logs crudos por bloque en: {LOGS_DIR}", flush=True)
+    print("Ctrl+C para cortar.\n", flush=True)
 
-    ultimo_post = {}  # radio_id -> monotonic() del último POST
-    ultima_cc = None  # Color Code de la última línea "Sync: +DMR ..."
-    mnis_src_pendiente = None  # último "SRC(MNIS)" visto, a la espera de un "MNIS ARS"
-    inicio = time.monotonic()
-    ultimo_sync_ok = None
+    ultimo_post = {}
+    bloques_sin_sync = 0
     aviso_emitido = False
-
-    def deberia_postear(radio_id: str) -> bool:
-        ahora = time.monotonic()
-        if ahora - ultimo_post.get(radio_id, 0) < RATE_LIMIT_SEG:
-            return False
-        ultimo_post[radio_id] = ahora
-        return True
-
-    # Hilo lector separado: en modo SDR en vivo, con el canal en silencio
-    # real, dsd-fme puede no imprimir NADA durante minutos (a diferencia del
-    # modo archivo, que sí "chatea" constantemente incluso sin señal). Si
-    # leyéramos las líneas directo en el loop principal con un simple
-    # `for linea in proc.stdout`, el chequeo de recalibración (que depende
-    # del reloj, no de que lleguen líneas) quedaría bloqueado indefinidamente
-    # esperando la próxima línea y nunca podría dispararse. Con un hilo que
-    # solo lee y encola, el loop principal puede hacer `queue.get(timeout=…)`
-    # y revisar el reloj aunque no llegue nada.
-    lineas = queue.Queue()
-
-    def leer_stdout():
-        for linea_cruda in proc.stdout:
-            lineas.put(linea_cruda)
-        lineas.put(None)  # centinela: el proceso cerró su stdout
-
-    hilo_lector = threading.Thread(target=leer_stdout, daemon=True)
-    hilo_lector.start()
+    indice = 0
 
     try:
         while True:
-            if (
-                not aviso_emitido
-                and ultimo_sync_ok is None
-                and time.monotonic() - inicio > AVISO_SIN_SYNC_SEG
-            ):
-                print(
-                    f"\n⚠️  Pasaron {AVISO_SIN_SYNC_SEG}s sin ningún sync con Color Code=01. "
-                    "Puede hacer falta recalibrar FREQ_CORR_PPM (el offset de frecuencia "
-                    "deriva durante el día, ver INVESTIGACION_LRRP.md Sesión 8/9) antes de "
-                    "seguir esperando a ciegas.\n",
-                    flush=True,
-                )
-                aviso_emitido = True
+            indice += 1
+            hubo_sync = procesar_un_bloque(indice, ultimo_post)
 
-            try:
-                linea_cruda = lineas.get(timeout=1)
-            except queue.Empty:
-                continue  # nada nuevo todavía — vuelve arriba a re-chequear el reloj
-
-            if linea_cruda is None:
-                print("dsd-fme cerró su salida (¿se cayó el proceso o el dongle?).", flush=True)
-                break
-
-            linea = strip_ansi(linea_cruda).strip()
-            if not linea:
-                continue
-
-            m = SYNC_CC_RE.search(linea)
-            if m:
-                ultima_cc = m.group(1)
-                if ultima_cc == "01":
-                    ultimo_sync_ok = time.monotonic()
-                continue
-
-            if ultima_cc != "01":
-                # Todo lo demás (voz/ARS) solo se confía si vino inmediatamente
-                # después de un header con Color Code=01 válido (ver
-                # INVESTIGACION_LRRP.md: Color Code != 01 es ruido/decodificación
-                # marginal en este sistema).
-                continue
-
-            m = SRC_VOZ_RE.search(linea)
-            if m:
-                radio_id, tipo_llamada = m.group(1), m.group(2)
-                evento = "emergencia" if "Emergency" in tipo_llamada else "voz"
-                if deberia_postear(radio_id):
-                    enviar_presencia(radio_id, evento)
-                continue
-
-            m = MNIS_SRC_RE.search(linea)
-            if m:
-                mnis_src_pendiente = m.group(1)
-                continue
-
-            if MNIS_ARS_RE.search(linea) and mnis_src_pendiente is not None:
-                if deberia_postear(mnis_src_pendiente):
-                    enviar_presencia(mnis_src_pendiente, "ars")
-                mnis_src_pendiente = None
-                continue
+            if hubo_sync:
+                bloques_sin_sync = 0
+                aviso_emitido = False
+            else:
+                bloques_sin_sync += 1
+                if bloques_sin_sync >= BLOQUES_SIN_SYNC_PARA_AVISO and not aviso_emitido:
+                    print(
+                        f"\n⚠️  {bloques_sin_sync} bloques seguidos sin ningún sync con Color Code=01. "
+                        "Puede hacer falta recalibrar FREQ_CORR_HZ (ver INVESTIGACION_LRRP.md) — "
+                        "verificar antena conectada antes de asumir que es la calibración.\n",
+                        flush=True,
+                    )
+                    aviso_emitido = True
 
     except KeyboardInterrupt:
-        print("\nCortado por el usuario.")
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        print("\nCortado por el usuario.", flush=True)
 
 
 if __name__ == "__main__":

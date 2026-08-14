@@ -149,11 +149,17 @@ que se los escuchó, sin depender de tener su ubicación.
 | `radio_id`    | string             | sí        | ID DMR del equipo transmisor.                                                |
 | `radio_alias` | string             | no        | Nombre legible del equipo. Si el equipo ya existe, no pisa el alias conocido si no viene. |
 | `timestamp`   | string (ISO 8601)  | sí        | Momento de la decodificación del burst.                                      |
-| `evento`      | string             | no        | Uno de `"voz"`, `"emergencia"`, `"ars"`. Si no viene, se conserva el último evento conocido. |
+| `evento`      | string             | no        | Uno de `"voz"`, `"emergencia"`, `"ars"`, `"gps"`. Si no viene, se conserva el último evento conocido. |
 
 A diferencia de `/api/telemetry`, acá `radio_id` es siempre obligatorio (no
-hay alternativa por `radio_ip`) — un burst de voz/emergencia/ARS decodificado
-siempre trae el ID DMR de origen.
+hay alternativa por `radio_ip`) — un burst de voz/emergencia/ARS/GPS
+decodificado siempre trae el ID DMR de origen.
+
+`"gps"` es distinto de una posición real: se postea cuando `sdr-decoder`
+reconoce un token de protocolo LRRP/LOCN (request o response) en el burst
+decodificado, no cuando ya tiene coordenadas — la posición decodificada de
+verdad sigue yendo por `POST /api/telemetry` (ver sección anterior), que
+todavía no se logró con datos reales (ver `sdr-decoder/INVESTIGACION_LRRP.md`).
 
 #### Ejemplo de request
 
@@ -185,7 +191,8 @@ Al persistir, `backend` emite por `ws://backend/ws/telemetry` un mensaje
 ### Response — error de validación
 
 **`422 Unprocessable Entity`** — payload con campos faltantes, de tipo
-incorrecto, o `evento` con un valor fuera de `"voz"`/`"emergencia"`/`"ars"`.
+incorrecto, o `evento` con un valor fuera de
+`"voz"`/`"emergencia"`/`"ars"`/`"gps"`.
 
 ```json
 {

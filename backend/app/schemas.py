@@ -43,10 +43,12 @@ class PosicionBroadcast(BaseModel):
 
 
 # Eventos de presencia que puede reportar sdr-decoder al decodificar un
-# burst DMR válido de un equipo (voz, emergencia o registro ARS) — no
-# incluye posición: eso sigue siendo POST /api/telemetry, con LRRP todavía
-# en investigación por separado (ver sdr-decoder/INVESTIGACION_LRRP.md).
-EventoPresencia = Literal["voz", "emergencia", "ars"]
+# burst DMR válido de un equipo (voz, emergencia, registro ARS, o un
+# hallazgo de LRRP/GPS — ver Sesión 16 de INVESTIGACION_LRRP.md: "gps" se
+# postea cuando dsd-fme reconoce un token real de LRRP/LOCN, no una
+# posición en sí. La posición decodificada de verdad seguiría yendo por
+# POST /api/telemetry, con LRRP todavía en investigación por separado).
+EventoPresencia = Literal["voz", "emergencia", "ars", "gps"]
 
 
 class PresenceIn(BaseModel):
