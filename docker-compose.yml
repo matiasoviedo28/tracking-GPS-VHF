@@ -25,6 +25,13 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB}
       PRESENCE_ONLINE_THRESHOLD_SECONDS: ${PRESENCE_ONLINE_THRESHOLD_SECONDS:-300}
+    volumes:
+      # Bitácora de audio (ver docs/API.md, POST /api/audio-eventos): el
+      # Dockerfile de backend copia el código en build (COPY app ./app), sin
+      # volume mount — sin este volumen nombrado, cada rebuild/recreate del
+      # contenedor borraría los clips guardados. Mismo criterio que
+      # "db_data" para Postgres, acá aplicado a archivos en vez de una base.
+      - audio_data:/app/storage/audio
     ports:
       - "${BACKEND_PORT}:8000"
 
@@ -57,3 +64,4 @@ services:
 
 volumes:
   db_data:
+  audio_data:

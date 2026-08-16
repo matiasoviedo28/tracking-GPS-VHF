@@ -237,6 +237,7 @@ página, antes de que empiecen a llegar updates por WebSocket.
     "activo": true,
     "ultimo_visto": "2026-08-07T19:02:35-03:00",
     "ultimo_evento": "emergencia",
+    "icono": "base_vhf",
     "online": true,
     "ultima_posicion": null
   },
@@ -268,11 +269,225 @@ página, antes de que empiecen a llegar updates por WebSocket.
 últimos `PRESENCE_ONLINE_THRESHOLD_SECONDS` (300s / 5 minutos por defecto,
 configurable — ver `.env.example`). `ultimo_evento` es `null` si el equipo
 nunca reportó presencia con un tipo de evento (por ejemplo, si solo se lo
-conoce por telemetría de posición). `ultima_posicion` es `null` si el equipo
-nunca envió una posición (esperable mientras LRRP siga sin funcionar).
+conoce por telemetría de posición). `icono` es `null` hasta que se elige uno
+manualmente (ver `PATCH /api/equipos/{id}/icono` abajo) — es una
+representación puramente visual en el mapa, no viene de ningún dato
+decodificado por RF. `ultima_posicion` es `null` si el equipo nunca envió una
+posición (esperable mientras LRRP siga sin funcionar).
 
 No requiere query params ni paginación — volumen esperado de 6-20 equipos
 (ver ARQUITECTURA.md sección 4).
+
+---
+
+## PATCH /api/equipos/{id}/icono
+
+Asigna manualmente un ícono a un equipo, para representarlo en el mapa del
+frontend (pensado para el contexto de bomberos — base VHF, camión, handy,
+etc.). Es una elección del operador, sin relación con ningún dato
+decodificado por RF ni con el campo `tipo` (que categoriza al equipo en sí:
+handy/móvil/base).
+
+### Request
+
+`Content-Type: application/json`
+
+| Campo    | Tipo   | Requerido | Descripción                                                                 |
+|----------|--------|-----------|------------------------------------------------------------------------------|
+| `icono`  | string | sí        | Uno de `"base_vhf"`, `"camion_bomberos"`, `"ambulancia"`, `"fuego"`, `"handy"`, `"bombero"`. |
+
+#### Ejemplo de request
+
+```json
+{
+  "icono": "camion_bomberos"
+}
+```
+
+### Response — éxito
+
+**`200 OK`** — devuelve el `EquipoOut` completo y actualizado (mismo formato
+que cada elemento de `GET /api/equipos`).
+
+Al persistir, `backend` emite por `ws://backend/ws/telemetry` un mensaje
+`"type": "icono_update"` (ver más abajo) a todos los clientes conectados, para
+que el mapa se actualice en el momento sin depender de un refresh.
+
+### Response — error
+
+**`404 Not Found`** — no existe ningún equipo con ese `id`.
+
+**`422 Unprocessable Entity`** — `icono` ausente o con un valor fuera de la
+lista permitida.
+
+### Códigos de estado
+
+| Código | Cuándo |
+|---|---|
+| `200` | Ícono actualizado y emitido por WebSocket. |
+| `404` | No existe un equipo con ese `id`. |
+| `422` | Payload mal formado o `icono` inválido. |
+
+---
+
+## Bitácora de audio
+
+Registra el audio decodificado de cada evento de voz (incluye emergencia), sin
+excepción y sin filtrar por equipo — pensado para poder reescuchar después
+cualquier transmisión, no solo saber que ocurrió (eso ya lo cubre
+`POST /api/presence`). Si una transmisión larga queda partida en dos o más
+bloques del lado de `sdr-decoder`, hoy queda como dos o más clips separados
+— no se intenta unirlos en esta versión (ver `sdr-decoder/live_presence_bridge.py`).
+
+El audio se persiste en disco (no en la base) — ver `AUDIO_STORAGE_DIR` en
+`.env.example` y el volumen `audio_data` en `docker-compose.yml`.
+
+### POST /api/audio-eventos
+
+Sube un clip de audio decodificado junto con su metadata. Lo invoca
+`sdr-decoder` una vez por cada bloque que contuvo al menos un evento de voz
+o emergencia.
+
+#### Request
+
+`Content-Type: multipart/form-data`
+
+| Campo              | Tipo               | Requerido | Descripción                                                        |
+|--------------------|--------------------|-----------|----------------------------------------------------------------------|
+| `archivo`          | archivo (binario)  | sí        | El audio decodificado (WAV).                                        |
+| `timestamp_inicio` | string (ISO 8601)  | sí        | Momento aproximado de inicio de la transmisión (inicio del bloque).  |
+| `duracion_seg`     | number             | sí        | Duración aproximada del clip, en segundos (duración del bloque).     |
+| `radio_id`         | string             | no        | ID DMR del equipo transmisor, si se pudo identificar.                |
+| `radio_alias`      | string             | no        | Nombre legible del equipo, si se conoce.                             |
+
+`radio_id`/`radio_alias` son opcionales a propósito: un bloque puede
+contener voz de un `radio_id` sin alias conocido — igual se guarda el clip
+(bitácora de "lo que se escuchó", no un directorio de equipos).
+
+#### Ejemplo (curl, para probar sin depender del SDR)
+
+```bash
+curl -X POST http://localhost:8000/api/audio-eventos \
+  -F "archivo=@clip-de-prueba.wav" \
+  -F "timestamp_inicio=2026-08-16T14:32:07-03:00" \
+  -F "duracion_seg=12" \
+  -F "radio_id=1001" \
+  -F "radio_alias=Matías"
+```
+
+### Response — éxito
+
+**`200 OK`**
+
+```json
+{
+  "id": 5,
+  "radio_id": "1001",
+  "radio_alias": "Matías",
+  "timestamp_inicio": "2026-08-16T14:32:07-03:00",
+  "duracion_seg": 12,
+  "escuchado": false,
+  "ubicacion": null
+}
+```
+
+Al persistir, `backend` emite por `ws://backend/ws/telemetry` un mensaje
+`"type": "audio_event"` (ver más abajo) con la metadata — **no** el archivo
+en sí, el frontend lo pide aparte con `GET /api/audio-eventos/{id}/file`
+recién cuando el usuario le da play.
+
+### Response — error de validación
+
+**`422 Unprocessable Entity`** — falta `archivo`, `timestamp_inicio` o
+`duracion_seg`, o vienen con un tipo incorrecto.
+
+### Códigos de estado
+
+| Código | Cuándo |
+|---|---|
+| `200` | Clip guardado en disco, persistido en base y emitido por WebSocket. |
+| `422` | Payload mal formado o campos requeridos faltantes/de tipo incorrecto. |
+
+---
+
+### GET /api/audio-eventos
+
+Lista todos los clips de audio, ordenados por `timestamp_inicio` descendente
+(más recientes primero) — pensado para que el frontend cargue el estado
+inicial del panel de audio al abrir la página.
+
+#### Response
+
+**`200 OK`**
+
+```json
+[
+  {
+    "id": 6,
+    "radio_id": "1000",
+    "radio_alias": "Base Guardia",
+    "timestamp_inicio": "2026-08-16T14:35:10-03:00",
+    "duracion_seg": 12,
+    "escuchado": false,
+    "ubicacion": null
+  },
+  {
+    "id": 5,
+    "radio_id": "1001",
+    "radio_alias": "Matías",
+    "timestamp_inicio": "2026-08-16T14:32:07-03:00",
+    "duracion_seg": 12,
+    "escuchado": true,
+    "ubicacion": null
+  }
+]
+```
+
+`ubicacion` queda `null` en toda esta versión (campo preparado para cuando
+LRRP dé una posición real — ver `sdr-decoder/INVESTIGACION_LRRP.md` — sin
+usar todavía). No requiere query params ni paginación por ahora.
+
+---
+
+### GET /api/audio-eventos/{id}/file
+
+Sirve el archivo de audio del clip, para reproducción o descarga directa
+(pensado para usarse como `src` de un `<audio>` en el frontend).
+
+#### Response
+
+**`200 OK`** — el archivo de audio (`Content-Type` según el tipo real,
+`audio/wav` por defecto).
+
+**`404 Not Found`** — no existe ningún clip con ese `id`, o el registro
+existe pero el archivo ya no está en disco.
+
+---
+
+### PATCH /api/audio-eventos/{id}/escuchado
+
+Marca un clip como escuchado. Lo llama el frontend apenas el usuario le da
+play, no antes.
+
+#### Response — éxito
+
+**`200 OK`** — devuelve el `AudioEventoOut` completo y actualizado (mismo
+formato que cada elemento de `GET /api/audio-eventos`).
+
+Al persistir, `backend` emite por `ws://backend/ws/telemetry` un mensaje
+`"type": "audio_event_escuchado"` (ver más abajo), para que otros clientes
+con el panel abierto vean el cambio sin depender de un refresh.
+
+#### Response — error
+
+**`404 Not Found`** — no existe ningún clip con ese `id`.
+
+### Códigos de estado (GET /file y PATCH /escuchado)
+
+| Código | Cuándo |
+|---|---|
+| `200` | Archivo servido / clip marcado como escuchado. |
+| `404` | No existe un clip con ese `id` (o, en `/file`, el archivo no está en disco). |
 
 ---
 
@@ -317,11 +532,50 @@ mensaje trae un campo `"type"` que distingue cuál de los dos es.
 }
 ```
 
+### Mensaje `"type": "icono_update"` (por cada cambio de ícono vía `PATCH /api/equipos/{id}/icono`)
+
+```json
+{
+  "type": "icono_update",
+  "equipo_id": 3,
+  "icono": "camion_bomberos"
+}
+```
+
+### Mensaje `"type": "audio_event"` (por cada clip nuevo de `POST /api/audio-eventos`)
+
+```json
+{
+  "type": "audio_event",
+  "id": 5,
+  "radio_id": "1001",
+  "radio_alias": "Matías",
+  "timestamp_inicio": "2026-08-16T14:32:07-03:00",
+  "duracion_seg": 12,
+  "escuchado": false
+}
+```
+
+Trae la metadata, no el archivo — el frontend agrega el clip arriba de la
+lista del panel de audio y lo pide con `GET /api/audio-eventos/{id}/file`
+solo cuando el usuario le da play.
+
+### Mensaje `"type": "audio_event_escuchado"` (por cada `PATCH /api/audio-eventos/{id}/escuchado`)
+
+```json
+{
+  "type": "audio_event_escuchado",
+  "id": 5,
+  "escuchado": true
+}
+```
+
 No emite histórico al conectarse — solo eventos nuevos a partir de la
 conexión (para el estado inicial completo, tanto de posición como de
-presencia, usar `GET /api/equipos` al cargar la página). Un endpoint de
-histórico de posiciones (para timelapse, sección 6 de ARQUITECTURA.md) queda
-fuera del alcance de esta versión.
+presencia, usar `GET /api/equipos` al cargar la página, y `GET
+/api/audio-eventos` para la bitácora de audio). Un endpoint de histórico de
+posiciones (para timelapse, sección 6 de ARQUITECTURA.md) queda fuera del
+alcance de esta versión.
 
 ---
 

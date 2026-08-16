@@ -90,3 +90,8 @@ Thumbs.db
 # --- Docker ---
 .docker/
 docker-compose.override.yml
+
+# --- Bitácora de audio (ver docs/API.md, POST /api/audio-eventos) ---
+# En Docker vive en el volumen nombrado "audio_data" (no en el repo), pero
+# si se corre el backend suelto (sin compose) los clips caen acá.
+backend/storage/

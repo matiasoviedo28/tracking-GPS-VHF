@@ -3,6 +3,7 @@
 const BACKEND_WS_PORT = 8000;
 const WS_URL = `ws://${window.location.hostname}:${BACKEND_WS_PORT}/ws/telemetry`;
 const API_EQUIPOS_URL = `http://${window.location.hostname}:${BACKEND_WS_PORT}/api/equipos`;
+const API_AUDIO_URL = `http://${window.location.hostname}:${BACKEND_WS_PORT}/api/audio-eventos`;
 
 // Debe coincidir con PRESENCE_ONLINE_THRESHOLD_SECONDS del backend (ver
 // .env.example) — no hay forma de inyectar env vars a este frontend
@@ -16,10 +17,36 @@ const NOMBRES_EVENTO = {
   ars: "ARS (registro)",
 };
 
+// Íconos disponibles para el mapa (ver IconoEquipo en backend/app/schemas.py)
+// — elección puramente visual del operador vía el popup del marcador.
+const ICONOS = {
+  base_vhf: { emoji: "📡", etiqueta: "Base VHF" },
+  camion_bomberos: { emoji: "🚒", etiqueta: "Camión de bomberos" },
+  ambulancia: { emoji: "🚑", etiqueta: "Ambulancia" },
+  fuego: { emoji: "🔥", etiqueta: "Incendio activo" },
+  handy: { emoji: "📻", etiqueta: "Handy" },
+  bombero: { emoji: "🧑‍🚒", etiqueta: "Bombero a pie" },
+};
+
+function crearIcono(iconoKey) {
+  const emoji = (ICONOS[iconoKey] && ICONOS[iconoKey].emoji) || "";
+  return L.divIcon({
+    className: "marcador-equipo",
+    html: `<div class="marcador-punto">${emoji}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
+    popupAnchor: [0, -15],
+  });
+}
+
 // Centro inicial: Merlo, San Luis, Argentina.
 const CENTRO_MERLO = [-32.3436, -65.0128];
 
-const map = L.map("map").setView(CENTRO_MERLO, 13);
+// zoomControl: false porque el control de zoom por defecto va arriba a la
+// izquierda, donde ahora vive el panel de audio (ver index.html) — se
+// vuelve a agregar abajo a la izquierda, lejos de los dos paneles.
+const map = L.map("map", { zoomControl: false }).setView(CENTRO_MERLO, 13);
+L.control.zoom({ position: "bottomleft" }).addTo(map);
 
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
@@ -35,7 +62,23 @@ function formatearHora(isoString) {
   });
 }
 
-function construirPopup(posicion) {
+function construirSelectorIconos(equipoId, iconoActual) {
+  const botones = Object.entries(ICONOS)
+    .map(([key, { emoji, etiqueta }]) => {
+      const activo = key === iconoActual ? " icono-btn--activo" : "";
+      return `<button type="button" class="icono-btn${activo}" data-equipo-id="${equipoId}" data-icono="${key}" title="${etiqueta}">${emoji}</button>`;
+    })
+    .join("");
+
+  return `
+    <div class="icono-selector">
+      <div class="icono-selector-titulo">Cambiar ícono:</div>
+      <div class="icono-selector-botones">${botones}</div>
+    </div>
+  `;
+}
+
+function construirPopup(equipoId, posicion, iconoActual) {
   const partes = [
     `<strong>${posicion.radio_alias}</strong>`,
     `Última posición: ${posicion.lat.toFixed(5)}, ${posicion.lon.toFixed(5)}`,
@@ -47,27 +90,177 @@ function construirPopup(posicion) {
   if (posicion.rumbo != null) {
     partes.push(`Rumbo: ${posicion.rumbo}°`);
   }
-  return partes.join("<br>");
+  return partes.join("<br>") + construirSelectorIconos(equipoId, iconoActual);
 }
 
-function actualizarMarcador(posicion) {
+// equipo_id -> última posición conocida (necesario para poder redibujar el
+// marcador/popup cuando cambia el ícono, sin depender de un nuevo
+// position_update).
+const ultimasPosiciones = new Map();
+
+function renderMarcador(equipoId) {
+  const posicion = ultimasPosiciones.get(equipoId);
+  if (!posicion) return; // todavía no llegó ninguna posición para este equipo
+
+  const estado = equiposEstado.get(equipoId) || {};
   const posLatLng = [posicion.lat, posicion.lon];
-  let marcador = marcadores.get(posicion.equipo_id);
+  let marcador = marcadores.get(equipoId);
+  const icono = crearIcono(estado.icono);
 
   if (!marcador) {
-    marcador = L.marker(posLatLng).addTo(map);
-    marcadores.set(posicion.equipo_id, marcador);
+    marcador = L.marker(posLatLng, { icon: icono }).addTo(map);
+    marcadores.set(equipoId, marcador);
   } else {
     marcador.setLatLng(posLatLng);
+    marcador.setIcon(icono);
   }
 
-  marcador.bindPopup(construirPopup(posicion));
+  marcador.bindPopup(construirPopup(equipoId, posicion, estado.icono));
 }
+
+async function cambiarIcono(equipoId, icono) {
+  try {
+    const resp = await fetch(`${API_EQUIPOS_URL}/${equipoId}/icono`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ icono }),
+    });
+    if (!resp.ok) throw new Error(`PATCH icono -> ${resp.status}`);
+    // La actualización visual llega por WS (icono_update), no hace falta
+    // tocar el marcador acá directamente.
+  } catch (err) {
+    console.error("No se pudo actualizar el ícono:", err);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const boton = event.target.closest(".icono-btn");
+  if (!boton) return;
+  cambiarIcono(Number(boton.dataset.equipoId), boton.dataset.icono);
+});
 
 function setEstado(clase, texto) {
   const el = document.getElementById("status");
   el.className = `status status--${clase}`;
   el.textContent = texto;
+}
+
+// ---- Panel de audio (bitácora) ----
+
+const audioEventos = new Map(); // id -> { id, radio_id, radio_alias, timestamp_inicio, duracion_seg, escuchado }
+
+function formatearDuracion(seg) {
+  if (seg < 60) return `${Math.round(seg)}s`;
+  const minutos = Math.floor(seg / 60);
+  const segundos = Math.round(seg % 60);
+  return `${minutos}m ${segundos}s`;
+}
+
+function construirItemAudioHTML(evento) {
+  const estadoClase = evento.escuchado ? "audio-item--escuchado" : "audio-item--no-escuchado";
+  const alias = evento.radio_alias || evento.radio_id || "Desconocido";
+  const radioId = evento.radio_id ? `<span class="audio-radio-id">${evento.radio_id}</span>` : "";
+  return `
+    <li class="audio-item ${estadoClase}" data-id="${evento.id}">
+      <div class="audio-info">
+        <span class="audio-alias">${alias} ${radioId}</span>
+        <span class="audio-detalle">${formatearHora(evento.timestamp_inicio)} · ${formatearDuracion(evento.duracion_seg)}</span>
+      </div>
+      <audio class="audio-player" controls preload="none" data-id="${evento.id}" src="${API_AUDIO_URL}/${evento.id}/file"></audio>
+    </li>
+  `;
+}
+
+// Solo para la carga inicial — reconstruye toda la lista de una vez. Los
+// clips que llegan en vivo por WS NO pasan por acá (ver
+// agregarClipAudioEnVivo): un innerHTML completo destruiría y recrearía
+// todos los <audio> existentes, cortando la reproducción de un clip que ya
+// estuviera sonando en el momento.
+function renderPanelAudio() {
+  const lista = document.getElementById("lista-audio");
+  const eventos = Array.from(audioEventos.values()).sort(
+    (a, b) => new Date(b.timestamp_inicio) - new Date(a.timestamp_inicio)
+  );
+
+  if (eventos.length === 0) {
+    lista.innerHTML = '<li class="lista-audio-vacio">Sin clips todavía</li>';
+    return;
+  }
+
+  lista.innerHTML = eventos.map(construirItemAudioHTML).join("");
+  document.querySelectorAll(".audio-player").forEach((audioEl) => {
+    audioEl.addEventListener("play", () => marcarEscuchado(Number(audioEl.dataset.id)), { once: true });
+  });
+}
+
+function agregarClipAudioEnVivo(datos) {
+  const evento = {
+    id: datos.id,
+    radio_id: datos.radio_id,
+    radio_alias: datos.radio_alias,
+    timestamp_inicio: datos.timestamp_inicio,
+    duracion_seg: datos.duracion_seg,
+    escuchado: datos.escuchado,
+  };
+  audioEventos.set(evento.id, evento);
+
+  const lista = document.getElementById("lista-audio");
+  const vacio = lista.querySelector(".lista-audio-vacio");
+  if (vacio) vacio.remove();
+
+  lista.insertAdjacentHTML("afterbegin", construirItemAudioHTML(evento));
+  const audioEl = lista.querySelector(`.audio-player[data-id="${evento.id}"]`);
+  if (audioEl) {
+    audioEl.addEventListener("play", () => marcarEscuchado(evento.id), { once: true });
+  }
+}
+
+// Actualiza solo la clase visual del <li> (no reconstruye el <audio>) —
+// tanto para el marcado optimista local como para un audio_event_escuchado
+// que llegue de otro cliente con el panel abierto.
+function actualizarClaseEscuchado(id) {
+  const li = document.querySelector(`.audio-item[data-id="${id}"]`);
+  if (li) {
+    li.classList.remove("audio-item--no-escuchado");
+    li.classList.add("audio-item--escuchado");
+  }
+}
+
+function manejarAudioEventoEscuchado(datos) {
+  const evento = audioEventos.get(datos.id);
+  if (evento) {
+    evento.escuchado = datos.escuchado;
+    audioEventos.set(datos.id, evento);
+  }
+  actualizarClaseEscuchado(datos.id);
+}
+
+async function marcarEscuchado(id) {
+  const evento = audioEventos.get(id);
+  if (!evento || evento.escuchado) return; // ya marcado, no repetir el PATCH
+
+  manejarAudioEventoEscuchado({ id, escuchado: true }); // optimista, sin esperar la respuesta
+  try {
+    const resp = await fetch(`${API_AUDIO_URL}/${id}/escuchado`, { method: "PATCH" });
+    if (!resp.ok) throw new Error(`PATCH escuchado -> ${resp.status}`);
+  } catch (err) {
+    console.error("No se pudo marcar el clip como escuchado:", err);
+  }
+}
+
+async function cargarAudioEventosIniciales() {
+  try {
+    const resp = await fetch(API_AUDIO_URL);
+    if (!resp.ok) throw new Error(`GET /api/audio-eventos -> ${resp.status}`);
+    const eventos = await resp.json();
+    for (const evento of eventos) {
+      audioEventos.set(evento.id, evento);
+    }
+    renderPanelAudio();
+  } catch (err) {
+    // No bloquea el resto de la app si falla la carga inicial de este panel.
+    console.error("No se pudo cargar el estado inicial de la bitácora de audio:", err);
+  }
 }
 
 // ---- Panel de equipos (presencia) ----
@@ -136,9 +329,24 @@ async function cargarEquiposIniciales() {
         alias: equipo.alias,
         radio_id: equipo.radio_id,
         tipo: equipo.tipo,
+        icono: equipo.icono,
         ultimo_visto: equipo.ultimo_visto ? new Date(equipo.ultimo_visto) : null,
         ultimo_evento: equipo.ultimo_evento,
       });
+      if (equipo.ultima_posicion) {
+        ultimasPosiciones.set(equipo.id, {
+          equipo_id: equipo.id,
+          radio_id: equipo.radio_id,
+          radio_alias: equipo.alias,
+          lat: equipo.ultima_posicion.lat,
+          lon: equipo.ultima_posicion.lon,
+          altitud: equipo.ultima_posicion.altitud,
+          velocidad: equipo.ultima_posicion.velocidad,
+          rumbo: equipo.ultima_posicion.rumbo,
+          timestamp: equipo.ultima_posicion.timestamp,
+        });
+        renderMarcador(equipo.id);
+      }
     }
     renderPanelEquipos();
   } catch (err) {
@@ -160,7 +368,8 @@ function manejarPresenceUpdate(datos) {
 }
 
 function manejarPositionUpdate(datos) {
-  actualizarMarcador(datos);
+  ultimasPosiciones.set(datos.equipo_id, datos);
+  renderMarcador(datos.equipo_id);
 
   // Una posición también es evidencia de presencia (ver docs/API.md) — se
   // refleja en el panel aunque no traiga un "evento" propio de
@@ -176,6 +385,11 @@ function manejarPositionUpdate(datos) {
   renderPanelEquipos();
 }
 
+function manejarIconoUpdate(datos) {
+  upsertEquipoEstado({ id: datos.equipo_id, icono: datos.icono });
+  renderMarcador(datos.equipo_id);
+}
+
 function conectar() {
   const ws = new WebSocket(WS_URL);
 
@@ -185,6 +399,12 @@ function conectar() {
     const datos = JSON.parse(event.data);
     if (datos.type === "presence_update") {
       manejarPresenceUpdate(datos);
+    } else if (datos.type === "icono_update") {
+      manejarIconoUpdate(datos);
+    } else if (datos.type === "audio_event") {
+      agregarClipAudioEnVivo(datos);
+    } else if (datos.type === "audio_event_escuchado") {
+      manejarAudioEventoEscuchado(datos);
     } else {
       // "position_update", o mensaje sin "type" (compatibilidad hacia atrás).
       manejarPositionUpdate(datos);
@@ -200,6 +420,7 @@ function conectar() {
 }
 
 cargarEquiposIniciales();
+cargarAudioEventosIniciales();
 conectar();
 
 // Recalcula tiempos relativos y estado online/offline aunque no lleguen

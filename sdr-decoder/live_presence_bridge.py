@@ -35,6 +35,17 @@ Code=01 que se usa para voz/ARS — a diferencia de esos, un hallazgo de
 LRRP es tan raro e importante que preferimos el riesgo de un falso
 positivo antes que perder uno real por un gate demasiado estricto).
 
+Bitácora de audio agregada: cuando un bloque contiene al menos un evento de
+voz o emergencia, además del POST a /api/presence (sin reemplazarlo) se
+guarda el audio decodificado de todo el bloque con "-w <file>" de dsd-fme
+(confirmado por --help; NO es el mismo mecanismo que -P/Per-Call, que
+maneja sus propios nombres de archivo) y se sube a POST /api/audio-eventos
+con la metadata (radio_id/alias, inicio aproximado, duración aproximada del
+bloque). Si el bloque mezcla voz de más de un radio_id, se usa el primero
+como metadata representativa — el audio guardado es el del bloque
+completo, no separado por hablante (requeriría el modo Per-Call de
+dsd-fme, fuera de alcance de esta versión).
+
 Por qué este diseño y no `dsd-fme -i rtl:...` en vivo (versión anterior):
 la Sesión 11 encontró que el modo SDR en vivo de `dsd-fme` usa un pipeline
 interno de muestreo completamente distinto (1.008 MS/s, oversampling 84x)
@@ -70,6 +81,7 @@ Sesión 11 y la Sesión 16 perdieron tiempo en eso).
 """
 
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -77,6 +89,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -109,6 +122,14 @@ LOGS_DIR = Path(__file__).resolve().parent / "logs_sesion16"
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 PRESENCE_ENDPOINT = f"{BACKEND_URL}/api/presence"
+AUDIO_EVENTOS_ENDPOINT = f"{BACKEND_URL}/api/audio-eventos"
+
+# Bitácora de audio: bytes de un WAV vacío (solo header, sin frames de
+# audio) que escribe dsd-fme con "-w" cuando no decodificó nada en el
+# bloque — confirmado empíricamente (ver resumen de la sesión que agregó
+# esto). Un archivo de este tamaño o menor no tiene audio real, no se
+# postea.
+AUDIO_WAV_HEADER_BYTES = 44
 
 # Mapeo Source ID -> alias conocido, confirmado en INVESTIGACION_LRRP.md
 # (sesiones 7-9). Agregar acá cualquier radio nuevo que se identifique.
@@ -123,7 +144,13 @@ BLOQUES_SIN_SYNC_PARA_AVISO = 5  # ~5 bloques de 12s ≈ 1 minuto sin ningún sy
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 SYNC_CC_RE = re.compile(r"Sync:\s*\+?DMR.*\|\s*Color Code=(\S+)")
-SRC_VOZ_RE = re.compile(r"SRC=(\d+).*?(Group Emergency Call|Group Call)")
+# "Group TXI Call" agregado tras una prueba real con la bitácora de audio:
+# una transmisión real de Base Guardia (SRC=1000, FID=0x10) no matcheaba
+# "Group Call" porque dsd-fme la imprime como "Group TXI Call" (llamada de
+# grupo con flag de Transmit Interrupt) — sigue siendo tráfico de voz real
+# (confirmado por "Activity Update TS1: Group Voice" en la misma línea de
+# log), solo con un FID de fabricante distinto al 0x00 genérico.
+SRC_VOZ_RE = re.compile(r"SRC=(\d+).*?(Group Emergency Call|Group TXI Call|Group Call)")
 MNIS_SRC_RE = re.compile(r"SRC\(MNIS\):\s*0*(\d+)")
 MNIS_ARS_RE = re.compile(r"MNIS ARS")
 
@@ -165,6 +192,62 @@ def enviar_presencia(radio_id: str, evento: str) -> None:
         print(f"  [{etiqueta}] evento={evento} -> ERROR {exc.code}: {detalle}", flush=True)
     except urllib.error.URLError as exc:
         print(f"  [{etiqueta}] evento={evento} -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
+
+
+def _codificar_multipart(campos: dict, archivo_path: Path, nombre_campo_archivo: str) -> tuple[bytes, str]:
+    """Arma un cuerpo multipart/form-data a mano (sin depender de `requests`,
+    que no es una dependencia de este script — ver docstring del módulo,
+    solo librerías estándar)."""
+    boundary = uuid.uuid4().hex
+    partes = []
+
+    for clave, valor in campos.items():
+        partes.append(f"--{boundary}\r\n".encode())
+        partes.append(f'Content-Disposition: form-data; name="{clave}"\r\n\r\n'.encode())
+        partes.append(f"{valor}\r\n".encode())
+
+    content_type = mimetypes.guess_type(archivo_path.name)[0] or "application/octet-stream"
+    partes.append(f"--{boundary}\r\n".encode())
+    partes.append(
+        (
+            f'Content-Disposition: form-data; name="{nombre_campo_archivo}"; '
+            f'filename="{archivo_path.name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode()
+    )
+    partes.append(archivo_path.read_bytes())
+    partes.append(b"\r\n")
+    partes.append(f"--{boundary}--\r\n".encode())
+
+    return b"".join(partes), f"multipart/form-data; boundary={boundary}"
+
+
+def enviar_audio_evento(radio_id, radio_alias, timestamp_inicio_iso: str, duracion_seg: float, audio_path: Path) -> None:
+    campos = {
+        "timestamp_inicio": timestamp_inicio_iso,
+        "duracion_seg": str(duracion_seg),
+    }
+    if radio_id is not None:
+        campos["radio_id"] = radio_id
+    if radio_alias is not None:
+        campos["radio_alias"] = radio_alias
+
+    cuerpo, content_type = _codificar_multipart(campos, audio_path, "archivo")
+    request = urllib.request.Request(
+        AUDIO_EVENTOS_ENDPOINT,
+        data=cuerpo,
+        headers={"Content-Type": content_type},
+        method="POST",
+    )
+    etiqueta = radio_alias or radio_id or "desconocido"
+    try:
+        with urllib.request.urlopen(request, timeout=10) as resp:
+            print(f"  [{etiqueta}] audio del bloque -> POST {resp.status}", flush=True)
+    except urllib.error.HTTPError as exc:
+        detalle = exc.read().decode("utf-8", "replace")
+        print(f"  [{etiqueta}] audio del bloque -> ERROR {exc.code}: {detalle}", flush=True)
+    except urllib.error.URLError as exc:
+        print(f"  [{etiqueta}] audio del bloque -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
 
 
 def parsear_bloque(texto: str):
@@ -264,8 +347,15 @@ def convertir_bloque(iq_path: Path, wav_path: Path) -> bool:
     return wav_path.exists() and wav_path.stat().st_size > 0
 
 
-def decodificar_bloque(wav_path: Path) -> str:
-    cmd = ["dsd-fme", "-fs", "-i", str(wav_path), "-s", "48000", "-Z", "-o", "null"]
+def decodificar_bloque(wav_path: Path, audio_out_path: Path) -> str:
+    # "-w <file>": vuelca a un WAV el audio sintetizado/decodificado de todo
+    # el bloque (confirmado en "dsd-fme --help", no asumido — ver resumen).
+    # Si el bloque no tuvo voz, el archivo queda con solo el header (44
+    # bytes), sin frames — se descarta después sin postear (AUDIO_WAV_HEADER_BYTES).
+    cmd = [
+        "dsd-fme", "-fs", "-i", str(wav_path), "-s", "48000", "-Z", "-o", "null",
+        "-w", str(audio_out_path),
+    ]
     try:
         resultado = subprocess.run(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -298,6 +388,11 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> bool:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     iq_path = SCRATCH_DIR / f"block_{ts}.cu8"
     wav_path = SCRATCH_DIR / f"block_{ts}.wav"
+    audio_path = SCRATCH_DIR / f"block_{ts}_audio.wav"
+    # Aproximación de "cuándo empezó la transmisión" para la bitácora de
+    # audio: el inicio de la grabación de este bloque (no se sabe el
+    # instante exacto dentro del bloque en que arrancó a hablar realmente).
+    bloque_inicio_iso = datetime.now(timezone.utc).astimezone().isoformat()
 
     t0 = time.monotonic()
     try:
@@ -309,7 +404,7 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> bool:
             print(f"[bloque {indice}] conversión falló, sigo con el próximo.", flush=True)
             return False
 
-        salida = decodificar_bloque(wav_path)
+        salida = decodificar_bloque(wav_path, audio_path)
         guardar_log_crudo(indice, ts, salida)
         eventos, hubo_sync, hallazgos_lrrp = parsear_bloque(salida)
         duracion = time.monotonic() - t0
@@ -351,12 +446,29 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> bool:
                 ultimo_post[radio_id] = ahora
                 enviar_presencia(radio_id, evento)
 
+        # Bitácora de audio: todo evento de voz o emergencia detectado en el
+        # bloque (Base Guardia incluida, sin filtrar por equipo — ambos son
+        # llamadas de voz reales, con AMBE; "ars" es solo un registro de
+        # datos, sin audio). Un bloque = un clip: si hubo más de un
+        # radio_id/evento distinto mezclado en el mismo bloque, se usa el
+        # primero como metadata representativa, pero el audio guardado es el
+        # del bloque completo (mismo criterio de granularidad ya aceptado
+        # para transmisiones largas partidas en 2+ bloques).
+        eventos_voz = [(radio_id, evento) for radio_id, evento in eventos if evento in ("voz", "emergencia")]
+        if eventos_voz and audio_path.exists() and audio_path.stat().st_size > AUDIO_WAV_HEADER_BYTES:
+            radio_id_repr, _ = eventos_voz[0]
+            alias_repr = ALIAS_CONOCIDOS.get(radio_id_repr)
+            enviar_audio_evento(radio_id_repr, alias_repr, bloque_inicio_iso, BLOCK_SECONDS, audio_path)
+
         return hubo_sync
     finally:
-        # Limpieza del bloque, pase lo que pase (no acumular archivos IQ/WAV
-        # — el log crudo de texto, guardado arriba, NO se borra).
+        # Limpieza del bloque, pase lo que pase (no acumular archivos
+        # IQ/WAV/audio — el log crudo de texto, guardado arriba, NO se
+        # borra; el audio "permanente" ya quedó en el backend, si
+        # correspondía guardarlo).
         iq_path.unlink(missing_ok=True)
         wav_path.unlink(missing_ok=True)
+        audio_path.unlink(missing_ok=True)
 
 
 def main() -> None:

@@ -33,6 +33,11 @@ class Equipo(Base):
     # evento de presencia con tipo propio.
     ultimo_visto = Column(DateTime(timezone=True), nullable=True)
     ultimo_evento = Column(String, nullable=True)  # voz | emergencia | ars | gps
+    # Ícono elegido a mano para representar el equipo en el mapa del
+    # frontend (ver IconoEquipo en schemas.py) — no tiene relación con
+    # "tipo" (handy/movil/base, categoría del equipo en sí), es solo la
+    # representación visual que eligió el operador desde el popup del mapa.
+    icono = Column(String, nullable=True)
 
     posiciones = relationship("Posicion", back_populates="equipo")
 
@@ -51,3 +56,23 @@ class Posicion(Base):
     recibido_en = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     equipo = relationship("Equipo", back_populates="posiciones")
+
+
+class EventoAudio(Base):
+    __tablename__ = "eventos_audio"
+
+    id = Column(Integer, primary_key=True)
+    # Denormalizado a propósito (sin FK a Equipo): esto es una bitácora de lo
+    # que efectivamente se escuchó, no un dato de identidad de equipo — un
+    # radio_id desconocido o sin alias igual tiene que poder loggearse.
+    radio_id = Column(String, nullable=True, index=True)
+    radio_alias = Column(String, nullable=True)
+    timestamp_inicio = Column(DateTime(timezone=True), nullable=False)
+    duracion_seg = Column(Float, nullable=False)
+    path_archivo = Column(String, nullable=False)
+    escuchado = Column(Boolean, nullable=False, default=False)
+    # Preparado para cuando LRRP dé una posición real (ver
+    # sdr-decoder/INVESTIGACION_LRRP.md) — sin usar todavía, no hay GPS real
+    # aún. Formato sin definir (podría terminar siendo lat/lon separados o
+    # un FK a Posicion) — placeholder simple a propósito.
+    ubicacion = Column(String, nullable=True)

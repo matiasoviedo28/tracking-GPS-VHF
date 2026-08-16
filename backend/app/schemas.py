@@ -65,6 +65,18 @@ class PresenceOut(BaseModel):
     ultimo_evento: EventoPresencia | None = None
 
 
+# Íconos disponibles para representar un equipo en el mapa del frontend,
+# pensados para el contexto de bomberos (ver ARQUITECTURA.md). Es una
+# elección puramente visual/manual del operador, sin relación con "tipo".
+IconoEquipo = Literal[
+    "base_vhf", "camion_bomberos", "ambulancia", "fuego", "handy", "bombero"
+]
+
+
+class EquipoIconoIn(BaseModel):
+    icono: IconoEquipo
+
+
 class PosicionResumen(BaseModel):
     lat: float
     lon: float
@@ -85,5 +97,21 @@ class EquipoOut(BaseModel):
     activo: bool
     ultimo_visto: datetime | None = None
     ultimo_evento: EventoPresencia | None = None
+    icono: IconoEquipo | None = None
     online: bool
     ultima_posicion: PosicionResumen | None = None
+
+
+# Bitácora de audio (ver docs/API.md) — un clip por bloque de dsd-fme que
+# contuvo al menos un evento de voz/emergencia. path_archivo NO se expone acá
+# a propósito (es un detalle interno de almacenamiento del servidor, no algo
+# que el frontend necesite — el archivo se sirve vía
+# GET /api/audio-eventos/{id}/file).
+class AudioEventoOut(BaseModel):
+    id: int
+    radio_id: str | None = None
+    radio_alias: str | None = None
+    timestamp_inicio: datetime
+    duracion_seg: float
+    escuchado: bool
+    ubicacion: str | None = None
