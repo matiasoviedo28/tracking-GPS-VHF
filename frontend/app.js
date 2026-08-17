@@ -46,7 +46,12 @@ const CENTRO_MERLO = [-32.3436, -65.0128];
 // zoomControl: false porque el control de zoom por defecto va arriba a la
 // izquierda, donde ahora vive el panel de audio (ver index.html) — se
 // vuelve a agregar abajo a la izquierda, lejos de los dos paneles.
-const map = L.map("map", { zoomControl: false }).setView(CENTRO_MERLO, 13);
+// maxZoom: 19 explícito porque L.markerClusterGroup.addTo(map) se llama
+// antes de que inicializarSelectorCapas() agregue la capa de tiles (más
+// abajo en este archivo) — sin esto, markercluster no tiene de dónde
+// leer el maxZoom del mapa todavía y tira "Map has no maxZoom specified".
+// Coincide con el maxZoom: 19 que ya tienen las dos capas en CAPAS_BASE.
+const map = L.map("map", { zoomControl: false, maxZoom: 19 }).setView(CENTRO_MERLO, 13);
 L.control.zoom({ position: "bottomleft" }).addTo(map);
 
 // Agrupa marcadores cercanos (o exactamente superpuestos, ej. dos equipos
