@@ -72,7 +72,7 @@ from pathlib import Path
 
 import numpy as np
 
-from baofeng_gps_parser import BaofengGpsDetector
+from dmr_texto_plano_parser import DetectorMensajesDMR
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -109,14 +109,23 @@ AUDIO_EVENTOS_ENDPOINT = f"{BACKEND_URL}/api/audio-eventos"
 SDR_STATUS_ENDPOINT = f"{BACKEND_URL}/api/sdr-status"
 TELEMETRY_ENDPOINT = f"{BACKEND_URL}/api/telemetry"
 
-# GPS "en texto plano" de un Baofeng UV-32, vía rebote ICMP de un paquete
-# UDP (ver baofeng_gps_parser.py e INVESTIGACION_LRRP.md, sección "🎯 HITO
-# — Primera coordenada GPS real capturada"). ⚠️ Mecanismo OPORTUNISTA: solo
-# funciona mientras el destinatario del mensaje no tenga el puerto UDP
-# escuchando (lo que provoca el rebote que capturamos). Si eso deja de
-# pasar, este detector deja de encontrar algo y no hay forma de saberlo
-# desde acá — no tratar esto como un reemplazo confiable de LRRP.
-BAOFENG_GPS_DETECTOR = BaofengGpsDetector()
+# Mensajería de datos en texto plano sobre DMR (ver
+# dmr_texto_plano_parser.py e INVESTIGACION_LRRP.md, secciones "🎯 HITO —
+# Primera coordenada GPS real capturada" y "🎯 HALLAZGO — El mismo canal
+# expone mensajes de texto, no solo GPS"). Reconoce coordenadas GPS (se
+# postean a /api/telemetry) y mensajes de texto libre sin forma de
+# coordenada (se guardan aparte, ver MENSAJES_INTERCEPTADOS_LOG).
+# ⚠️ Mecanismo OPORTUNISTA/forense, no un protocolo soportado:
+#   - El camino "icmp_bounce" solo funciona mientras el destinatario NO
+#     tenga el puerto UDP escuchando (lo que provoca el rebote que
+#     capturamos). Si eso deja de pasar, no hay forma de saberlo desde acá.
+#   - El camino "udp_directo" depende de que el destinatario SÍ tenga algo
+#     escuchando y el paquete se decodifique sin error.
+#   - El camino "fragmentos_reconstruidos" es best-effort sobre datos
+#     parciales — puede quedar incompleto o no encontrar nada, sin aviso.
+# No tratar ninguno de los tres como un reemplazo confiable de LRRP.
+DETECTOR_MENSAJES_DMR = DetectorMensajesDMR()
+MENSAJES_INTERCEPTADOS_LOG = LOGS_DIR / "mensajes_interceptados.log"
 
 # Bitácora de audio: bytes de un WAV vacío (solo header, sin frames de
 # audio) que escribe dsd-fme con "-w" cuando no decodificó nada en el
@@ -213,11 +222,12 @@ def enviar_presencia(radio_id: str, evento: str) -> None:
 
 def enviar_telemetry(radio_id: str, lat: float, lon: float, velocidad_kmh, timestamp_iso: str) -> None:
     """POST a /api/telemetry (ver docs/API.md) — usado por el detector de
-    GPS en texto plano del Baofeng UV-32 (`baofeng_gps_parser.py`). A
-    diferencia de /api/presence, `radio_alias` es un campo requerido por
-    el contrato — si no hay uno cargado en ALIAS_CONOCIDOS, se manda el
-    propio radio_id como alias (mismo comportamiento default que ya
-    aplica el backend en /api/presence)."""
+    mensajería DMR en texto plano (`dmr_texto_plano_parser.py`) cuando el
+    contenido decodificado tiene forma de coordenada. A diferencia de
+    /api/presence, `radio_alias` es un campo requerido por el contrato —
+    si no hay uno cargado en ALIAS_CONOCIDOS, se manda el propio radio_id
+    como alias (mismo comportamiento default que ya aplica el backend en
+    /api/presence)."""
     alias = ALIAS_CONOCIDOS.get(radio_id, radio_id)
     payload = {
         "radio_id": radio_id,
@@ -238,12 +248,32 @@ def enviar_telemetry(radio_id: str, lat: float, lon: float, velocidad_kmh, times
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as resp:
-            print(f"  [{alias}] telemetría GPS (Baofeng, texto plano) -> POST {resp.status}", flush=True)
+            print(f"  [{alias}] telemetría GPS (texto plano DMR) -> POST {resp.status}", flush=True)
     except urllib.error.HTTPError as exc:
         detalle = exc.read().decode("utf-8", "replace")
-        print(f"  [{alias}] telemetría GPS (Baofeng, texto plano) -> ERROR {exc.code}: {detalle}", flush=True)
+        print(f"  [{alias}] telemetría GPS (texto plano DMR) -> ERROR {exc.code}: {detalle}", flush=True)
     except urllib.error.URLError as exc:
-        print(f"  [{alias}] telemetría GPS (Baofeng, texto plano) -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
+        print(f"  [{alias}] telemetría GPS (texto plano DMR) -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
+
+
+def guardar_mensaje_interceptado(indice: int, ts: str, hallazgo: dict) -> None:
+    """Guarda un mensaje de texto interceptado (SIN forma de coordenada,
+    por lo tanto no apto para /api/telemetry) en un log aparte —
+    `mensajes_interceptados.log`, junto a los logs crudos por bloque. Es
+    un hallazgo de seguridad/curiosidad (ver INVESTIGACION_LRRP.md, "🎯
+    HALLAZGO — El mismo canal expone mensajes de texto, no solo GPS"), no
+    telemetría de posición — no se postea a ningún endpoint del backend."""
+    linea = (
+        f"[{datetime.now(timezone.utc).isoformat()}] bloque={indice} "
+        f"log=bloque_{indice:04d}_{ts}.log mecanismo={hallazgo['mecanismo']} "
+        f"radio_id={hallazgo['radio_id']} contacto={hallazgo['radio_id_contacto']} "
+        f"crc_error={hallazgo['crc_error']} texto={hallazgo['texto_crudo']!r}\n"
+    )
+    try:
+        with open(MENSAJES_INTERCEPTADOS_LOG, "a") as f:
+            f.write(linea)
+    except OSError as exc:
+        print(f"  ERROR guardando mensaje interceptado: {exc}", flush=True)
 
 
 def enviar_estado_sdr(status: str, detalle: str) -> None:
@@ -570,21 +600,43 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> dict:
                 ultimo_post[radio_id] = ahora
                 enviar_presencia(radio_id, "gps")
 
-        hallazgos_baofeng = BAOFENG_GPS_DETECTOR.procesar_bloque(salida)
-        for hallazgo in hallazgos_baofeng:
-            if not hallazgo["completo"]:
+        hallazgos_dmr = DETECTOR_MENSAJES_DMR.procesar_bloque(salida)
+        for hallazgo in hallazgos_dmr:
+            if hallazgo["duplicado"]:
                 print(
-                    f"  [Baofeng GPS] hallazgo parcial de radio_id={hallazgo['radio_id']} "
-                    f"(campos incompletos, no se postea): {hallazgo['campos']}",
+                    f"  [{hallazgo['mecanismo']}] radio_id={hallazgo['radio_id']} -> ya visto por otro "
+                    "mecanismo/bloque reciente, no se re-postea ni re-loguea (dedup)",
                     flush=True,
                 )
                 continue
+
+            if not hallazgo["completo"]:
+                if hallazgo["campos"] or hallazgo["texto_crudo"].strip():
+                    print(
+                        f"  [📨 mensaje interceptado] mecanismo={hallazgo['mecanismo']} "
+                        f"radio_id={hallazgo['radio_id']} contacto={hallazgo['radio_id_contacto']} "
+                        f"(sin forma de coordenada, no se postea a /api/telemetry) "
+                        f"texto={hallazgo['texto_crudo']!r}",
+                        flush=True,
+                    )
+                    guardar_mensaje_interceptado(indice, ts, hallazgo)
+                else:
+                    print(
+                        f"  [{hallazgo['mecanismo']}] hallazgo vacío de radio_id={hallazgo['radio_id']} "
+                        "(sin campos ni texto, ej. paquete keepalive) — se ignora",
+                        flush=True,
+                    )
+                continue
+
+            frags = ""
+            if hallazgo["bloques_totales"] is not None:
+                frags = f" bloques={hallazgo['bloques_capturados']}/{hallazgo['bloques_totales']}"
             print("\n" + "#" * 70, flush=True)
-            print(f"### 🎯 GPS BAOFENG (texto plano vía rebote ICMP) — BLOQUE {indice} 🎯", flush=True)
+            print(f"### 🎯 GPS (texto plano DMR, mecanismo={hallazgo['mecanismo']}) — BLOQUE {indice} 🎯", flush=True)
             print("#" * 70, flush=True)
             print(
-                f"### radio_id={hallazgo['radio_id']} (rebotado vía contacto {hallazgo['radio_id_contacto']}) "
-                f"lat={hallazgo['lat']} lon={hallazgo['lon']} vel={hallazgo['velocidad_kmh']}",
+                f"### radio_id={hallazgo['radio_id']} (vía contacto {hallazgo['radio_id_contacto']}) "
+                f"lat={hallazgo['lat']} lon={hallazgo['lon']} vel={hallazgo['velocidad_kmh']}{frags}",
                 flush=True,
             )
             print(

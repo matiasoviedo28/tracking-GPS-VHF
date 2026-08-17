@@ -122,13 +122,14 @@ el documento, no el tamaño real del archivo.
   original — detalle completo, timestamps y hexdump en
   `../sdr-decoder/INVESTIGACION_LRRP.md`, sección "🎯 HITO — Primera
   coordenada GPS real capturada".
-- **Detección automatizada** (`sdr-decoder/baofeng_gps_parser.py`,
-  integrado a `live_presence_bridge.py`): el bridge ahora reconoce este
-  patrón por sí solo en cada bloque y postea a `POST /api/telemetry` si
-  encuentra una coordenada completa. Validado con un test de regresión
-  contra los bloques ya guardados del hito (sin transmisión nueva) — ver
-  detalle y resultado del test en `INVESTIGACION_LRRP.md`. **No se probó
-  todavía en vivo** con una transmisión nueva del Baofeng.
+- **Detección automatizada** (`sdr-decoder/dmr_texto_plano_parser.py` —
+  antes `baofeng_gps_parser.py`, renombrado al generalizarse—, integrado a
+  `live_presence_bridge.py`): el bridge ahora reconoce este patrón por sí
+  solo en cada bloque y postea a `POST /api/telemetry` si encuentra una
+  coordenada completa. Validado con un test de regresión contra los
+  bloques ya guardados del hito (sin transmisión nueva) — ver detalle y
+  resultado del test en `INVESTIGACION_LRRP.md`. **No se probó todavía en
+  vivo** con una transmisión nueva del Baofeng.
 - ⚠️ **Sigue siendo oportunista, no garantizado**: depende por completo de
   que el destinatario del mensaje (el "contacto" del handy) no tenga el
   puerto UDP 4007 escuchando. Si eso cambia, el detector deja de encontrar
@@ -147,9 +148,14 @@ el documento, no el tamaño real del archivo.
   para verlo, alcanza con que `dsd-fme` decodifique el burst con calidad
   suficiente. Detalle completo en `../sdr-decoder/INVESTIGACION_LRRP.md`,
   sección "🎯 HALLAZGO — El mismo canal expone mensajes de texto, no solo
-  GPS". **No automatizado** — `baofeng_gps_parser.py` solo reconoce el
-  caso de rebote ICMP, no un UDP directo como este; fue una decodificación
-  manual.
+  GPS". **Ahora automatizado**: `dmr_texto_plano_parser.py` reconoce este
+  camino ("udp_directo") además del rebote ICMP ("icmp_bounce") y de
+  fragmentos sueltos sin consolidar ("fragmentos_reconstruidos") —
+  detalle de los tres mecanismos, la deduplicación entre ellos, y el log
+  aparte para mensajes sin forma de coordenada
+  (`sdr-decoder/logs/mensajes_interceptados.log`) en
+  `INVESTIGACION_LRRP.md`, sección "🔧 Actualización — parser
+  generalizado a dos mecanismos + fragmentos sueltos".
 - **Relación con `radio_id 529385`** (ver "Sin identificar todavía" más
   abajo): ambos son sospechados de ser equipos Baofeng usados por un
   "efectivo personal", pero **no está confirmado si son el mismo handy

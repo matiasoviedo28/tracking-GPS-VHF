@@ -15,7 +15,9 @@ fecha, sin éxito). Desde el hito documentado en ese mismo archivo ("🎯 HITO �
 Primera coordenada GPS real capturada"), también puede recibir una posición
 originada en un mecanismo distinto y **oportunista**: un Baofeng UV-32 que
 manda su GPS como texto plano por UDP, capturado vía el rebote ICMP "Port
-Unreachable" del destinatario (ver `sdr-decoder/baofeng_gps_parser.py`). El
+Unreachable" del destinatario (ver `sdr-decoder/dmr_texto_plano_parser.py`,
+antes `baofeng_gps_parser.py` — renombrado al generalizarse a más de un
+mecanismo de captura). El
 contrato de este endpoint no cambia por eso — sigue siendo simplemente "una
 posición, de algún equipo, con lat/lon" — pero no asumir que todo lo que
 llega acá vino de LRRP.

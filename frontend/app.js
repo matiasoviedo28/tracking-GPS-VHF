@@ -49,6 +49,16 @@ const CENTRO_MERLO = [-32.3436, -65.0128];
 const map = L.map("map", { zoomControl: false }).setView(CENTRO_MERLO, 13);
 L.control.zoom({ position: "bottomleft" }).addTo(map);
 
+// Agrupa marcadores cercanos (o exactamente superpuestos, ej. dos equipos
+// reportando la misma posición) en una burbuja con el número de equipos —
+// se abre en click/zoom. maxClusterRadius chico porque acá lo que importa
+// es separar coincidencias exactas, no agrupar por zona.
+const grupoMarcadores = L.markerClusterGroup({
+  maxClusterRadius: 40,
+  spiderfyOnMaxZoom: true,
+  showCoverageOnHover: false,
+}).addTo(map);
+
 // Capas base seleccionables (ver control-capas en index.html) — ninguna se
 // agrega al mapa acá, eso lo hace inicializarSelectorCapas() más abajo.
 const CAPAS_BASE = {
@@ -152,7 +162,8 @@ function renderMarcador(equipoId) {
   const icono = crearIcono(estado.icono);
 
   if (!marcador) {
-    marcador = L.marker(posLatLng, { icon: icono }).addTo(map);
+    marcador = L.marker(posLatLng, { icon: icono });
+    grupoMarcadores.addLayer(marcador);
     marcadores.set(equipoId, marcador);
   } else {
     marcador.setLatLng(posLatLng);

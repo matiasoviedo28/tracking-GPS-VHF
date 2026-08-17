@@ -1385,3 +1385,122 @@ igual que el GPS del hito original antes de automatizarlo.
    de `tracking-GPS-VHF` — es una propiedad del hardware/firmware de
    terceros, que este proyecto simplemente puede observar por estar
    escuchando el aire.
+
+---
+
+## 🔧 Actualización — parser generalizado a dos mecanismos + fragmentos sueltos
+
+Se implementó lo planteado en el punto 1 de "Próximos pasos" de arriba.
+`baofeng_gps_parser.py` se **renombró a `dmr_texto_plano_parser.py`**
+(mismo cambio en el test, `test_dmr_texto_plano_parser.py`) porque el
+alcance dejó de ser "GPS de un Baofeng" para ser "cualquier mensaje de
+datos DMR `SAP 04 [IP Based]` sobre el puerto 4007, de cualquier equipo,
+GPS o texto libre".
+
+### Refactor: una sola función central de interpretación
+
+`interpretar_payload(payload: bytes)` decodifica el UTF-16LE, extrae
+campos genéricos, y arma lat/lon/velocidad si el texto tiene forma de
+coordenada — es la ÚNICA función que sabe leer el contenido, sin importar
+por cuál de los tres mecanismos de abajo se haya encontrado el payload.
+Evita duplicar la lógica de parseo entre caminos de detección.
+
+### Los tres mecanismos que reconoce ahora
+
+1. **`icmp_bounce`** — el ya documentado arriba: rebote ICMP "Port
+   Unreachable" porque el destinatario no tenía el puerto escuchando
+   (hito de GPS, `1 → 1007`).
+2. **`udp_directo`** — NUEVO: paquete UDP sin envolver, cuando el
+   destinatario SÍ tiene algo escuchando y el mensaje llega derecho, sin
+   error de red (hallazgo "Test123", `1001 → 1`, ver sección anterior).
+3. **`fragmentos_reconstruidos`** — NUEVO: cuando `dsd-fme` no llega a
+   consolidar su propio resumen "Multi Block PDU Message" por señal
+   marginal, y solo deja los bloques sueltos de la transmisión en el log.
+
+### Fragmentos sueltos: qué se puede reconstruir y qué no
+
+Se revisó el log de referencia (`bloque_0019...`, la coordenada nueva con
+fragmentos sueltos) para confirmar si `dsd-fme` imprime algún número de
+fragmento por bloque de continuación (FSN/DBSN) que permitiera reordenar
+— **no lo hace**: el único número visible es el total declarado en el
+header (`BLOCKS N`), no una posición por bloque. Por eso el
+reconstructor:
+- Asume que el orden de aparición en el log es el orden real de
+  transmisión (válido: `dsd-fme` procesa el WAV en una sola pasada
+  secuencial, no hay reordenamiento posible dentro de un mismo archivo).
+- Descarta el primer bloque después del header (es el propio framing DMR
+  — SAP/FMF/BLOCKS/etc — no el paquete IP/UDP embebido; confirmado
+  comparándolo contra casos donde `dsd-fme` sí consolidó el resumen: ese
+  primer bloque nunca aparece en el hex dump consolidado).
+- Reporta `bloques_capturados`/`bloques_totales` sin asumir en qué
+  posición cayó el hueco de los bloques faltantes — pueden ser
+  contiguos o no, no hay forma de saberlo con el texto disponible.
+- **Mejora encontrada en el camino**: las etiquetas ("Lat:"/"Long:")
+  suelen llegar corruptas o partidas por un hueco, pero el patrón DMS
+  (`grados°minutos'segundos`) casi siempre sobrevive intacto dentro de un
+  mismo bloque de 12-16 bytes. `interpretar_payload` ahora tiene un
+  fallback: si no encuentra las etiquetas limpias pero sí 2+ patrones DMS
+  en el texto, asume que el primero es Lat y el segundo Long (mismo orden
+  en todas las capturas de referencia). Gracias a esto, el bloque de
+  referencia (6 de 9 bloques capturados) igual reconstruye una coordenada
+  completa: **`lat=-32.339444, lon=-65.028639`** — una posición nueva y
+  distinta a la del hito original, coherente con un segundo fix GPS del
+  mismo lugar.
+
+### Deduplicación entre mecanismos
+
+Como ahora el mismo mensaje lógico puede aparecer por más de un camino
+(ej. visto consolidado Y reconstruido a mano si el resumen aparece tarde;
+o la misma coordenada repetida en bloques consecutivos), `
+DetectorMensajesDMR` arma una clave (`radio_id` + `radio_id_contacto` +
+lat/lon si es coordenada, o el texto normalizado si no) y descarta
+duplicados vistos en los últimos 5 bloques (~1 minuto) — no se re-postea
+a `/api/telemetry` ni se re-loguea a `mensajes_interceptados.log`, pero sí
+queda una línea en la consola del bridge marcando que se vio por más de
+un mecanismo (útil para depurar, no para el backend).
+
+### Mensajes de texto sin forma de coordenada: log aparte
+
+Cuando el contenido decodificado NO tiene forma de coordenada (ej.
+"Test123"), no se postea a `/api/telemetry` (ese endpoint espera lat/lon)
+— se guarda en `sdr-decoder/logs/mensajes_interceptados.log`, un archivo
+aparte del log crudo por bloque, con timestamp, mecanismo, radio_id,
+contacto, y el texto decodificado. Es un hallazgo de
+seguridad/curiosidad, no telemetría de posición.
+
+### Test de regresión ampliado
+
+`test_dmr_texto_plano_parser.py` corre TRES casos reales, sin generar
+ninguna transmisión nueva:
+
+```
+=== Caso 1: rebote ICMP (hito de GPS, bloques 3425/3426) ===
+PASS
+
+=== Caso 2: UDP directo, mensaje de texto (bloque 0028, 'Test123') ===
+PASS
+
+=== Caso 3: fragmentos sueltos sin consolidar (bloque 0019, coordenada nueva) ===
+PASS
+```
+
+Bug real encontrado y corregido en el camino: la regex que lee los
+bloques sueltos no contaba el espacio entre "Payload" y el primer byte
+(`Payload [43]` vs lo esperado `Payload[43]`) — sin eso, la Etapa 3 no
+encontraba nada. Corregido antes de dar por buena la Etapa 3.
+
+Integrado a `live_presence_bridge.py` y rebuildeado — arrancó sin errores
+de import, y el test de regresión corrido desde la imagen ya reconstruida
+también dio los tres PASS.
+
+### Sigue siendo forense y oportunista
+
+Ninguno de los tres mecanismos es un protocolo soportado. `icmp_bounce`
+depende de que el destinatario rechace el paquete; `udp_directo` depende
+de que lo acepte y se decodifique sin error; `fragmentos_reconstruidos`
+es best-effort sobre datos parciales, puede no encontrar nada o quedar
+incompleto sin ningún aviso. No tratar ninguno como un reemplazo
+confiable de LRRP, y no comunicar el hallazgo de mensajería de texto como
+una vulnerabilidad de este proyecto — es una propiedad del
+hardware/firmware de terceros que este sistema puede observar por estar
+escuchando el aire.

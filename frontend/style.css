@@ -525,6 +525,30 @@ html, body {
   line-height: 1;
 }
 
+/* Clustering (Leaflet.markercluster) — mismo lenguaje visual que
+   .marcador-punto (círculo con borde blanco y sombra), en vez del verde/
+   amarillo/naranja default del plugin, para que no desentone. */
+.marker-cluster div {
+  width: 32px;
+  height: 32px;
+  margin-left: 4px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--azul-cielo, #5b9bd5);
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.marker-cluster span {
+  color: #fff;
+  font-family: var(--fuente-sans);
+  font-weight: 600;
+  font-size: 13px;
+}
+
 .icono-selector {
   margin-top: 8px;
   padding-top: 8px;
