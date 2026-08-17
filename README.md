@@ -33,22 +33,22 @@ resuelva, pero hoy no recibe datos reales.
   captura está conectado, recibiendo datos, con problemas de antena, u operando
   con normalidad.
 - **Catálogo de equipos identificados**: ver
-  [`sdr-decoder/equipos.md`](./sdr-decoder/equipos.md) para el detalle de cada
+  [`docs/Equipos.md`](./docs/Equipos.md) para el detalle de cada
   radio_id conocido, marca/modelo, y hallazgos particulares.
 
 ## Capturas de pantalla
 
 **Panel de equipos en tiempo real**
 
-![Panel de equipos](./Equipos.png)
+![Panel de equipos](./docs/images/Equipos.png)
 
 **Bitácora de audio**
 
-![Bitácora de audio](./BITACORA.png)
+![Bitácora de audio](./docs/images/BITACORA.png)
 
 **Vista general del frontend**
 
-![Vista general](./FRONTED.png)
+![Vista general](./docs/images/FRONTED.png)
 
 ## Componentes
 
@@ -75,7 +75,7 @@ documentados en [`docs/ARQUITECTURA.md`](./docs/ARQUITECTURA.md).
 - [`sdr-decoder/INVESTIGACION_LRRP.md`](./sdr-decoder/INVESTIGACION_LRRP.md) —
   historial completo de la investigación técnica del protocolo, sesión por
   sesión.
-- [`sdr-decoder/equipos.md`](./sdr-decoder/equipos.md) — catálogo de equipos de
+- [`docs/Equipos.md`](./docs/Equipos.md) — catálogo de equipos de
   radio identificados.
 
 ## Cómo levantar el sistema

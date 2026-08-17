@@ -2,21 +2,28 @@
 
 Catálogo de referencia rápida de los equipos de radio identificados hasta ahora,
 por familia/modelo y rango de `radio_id`. El detalle completo de cada hallazgo
-(logs, timestamps, método de investigación) vive en `INVESTIGACION_LRRP.md` —
-acá solo el resumen por equipo, para no tener que releer todo el historial cada
-vez que hace falta ubicar qué es cada `radio_id`.
+(logs, timestamps, método de investigación) vive en
+`../sdr-decoder/INVESTIGACION_LRRP.md` — acá solo el resumen por equipo, para
+no tener que releer todo el historial cada vez que hace falta ubicar qué es
+cada `radio_id`.
 
 Documento vivo: actualizar cada vez que se identifique un equipo nuevo, se
 confirme un modelo/marca que faltaba, o se aprenda una característica nueva de
 uno ya conocido (ver `GET /api/equipos` para el estado en vivo de quién está
 online y cuál fue el último evento de cada uno).
 
+**Fotos**: se van a ir agregando en `docs/images/` a medida que se consigan.
+Usar siempre `<img ... width="220">` para que todas queden del mismo tamaño en
+el documento, no el tamaño real del archivo.
+
 ---
 
 ## Motorola DGP8550 — handies, radio_id 1001 a 1006
 
+<img src="images/Motorola_DGP8550.jpeg" alt="Motorola DGP8550" width="220">
+
 - **Modelo**: Motorola DGP8550 — confirmado por el usuario en el codeplug de
-  uno de estos equipos (ver `INVESTIGACION_LRRP.md`).
+  uno de estos equipos (ver `../sdr-decoder/INVESTIGACION_LRRP.md`).
 - **radio_id vistos transmitiendo hasta ahora**: `1001`, `1002`, `1004`, `1006`
   (dentro del rango 1001-1006 asignado a este modelo; `1003` y `1005` son parte
   del rango pero todavía no se los vio transmitir).
@@ -24,7 +31,7 @@ online y cuál fue el último evento de cada uno).
   - `1002` — alias conocido: **BVM1002**.
   - `1004`, `1006` — sin alias humano asignado todavía (aparecen en el panel
     mostrando el propio `radio_id` como alias, comportamiento default cuando
-    no hay uno cargado — ver `docs/API.md`).
+    no hay uno cargado — ver `API.md`).
 
 ### Características / hallazgos
 - **Codeplug**: el canal de voz normal usa Timeslot 1. Existe un canal
@@ -44,11 +51,11 @@ online y cuál fue el último evento de cada uno).
 
 ---
 
-## Hytera — handies, radio_id 1100 a 1109 (modelo sin especificar)
+## Hytera BD506 — handies, radio_id 1100 a 1109
 
-- **Modelo**: no identificado todavía — el usuario se refiere genéricamente a
-  "HT Hytera", sin número de modelo confirmado. **No inventar un modelo
-  específico hasta confirmarlo.**
+<img src="images/hytera_bd506.jpeg" alt="Hytera BD506" width="220">
+
+- **Modelo**: Hytera BD506 — confirmado por el usuario.
 - **radio_id vistos transmitiendo hasta ahora**: `1102` (dentro del rango
   1100-1109 asignado a esta familia; el resto del rango todavía no se vio
   transmitir).
@@ -77,7 +84,7 @@ online y cuál fue el último evento de cada uno).
   patrón exacto que los Motorola DGP8550**, pese a ser de un fabricante
   distinto. Este es un hallazgo importante: refuerza la hipótesis de que la
   ausencia de LRRP es un bloqueo del lado de la red (TLS-PSK), no algo
-  específico de una marca o modelo — ver `INVESTIGACION_LRRP.md`, sección
+  específico de una marca o modelo — ver `../sdr-decoder/INVESTIGACION_LRRP.md`, sección
   "Hito — primera captura real sin coordinación".
 - Primera transmisión capturada sin coordinación en tiempo real (nadie
   estaba avisado ni mirando la consola en el momento) — primera confirmación
@@ -87,6 +94,8 @@ online y cuál fue el último evento de cada uno).
 ---
 
 ## Motorola DEP450 — pendiente de identificar (sin radio_id conocido todavía)
+
+<img src="images/MOTOROLA_dep450.png" alt="Motorola DEP450" width="220">
 
 - **Modelo**: Motorola DEP450.
 - **radio_id**: ninguno confirmado todavía — **no se hizo ninguna

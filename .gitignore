@@ -60,18 +60,11 @@ pnpm-debug.log*
 logs/
 *.log
 
-# --- Imágenes / media / archivos pesados ---
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.bmp
+# --- Media pesada (las imágenes SÍ se versionan, ver docs/images/) ---
 *.mp4
 *.mov
 *.zip
 *.tar.gz
-!docs/**/*.png
-!docs/**/*.jpg
 
 # --- Bases de datos locales ---
 *.db
