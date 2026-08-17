@@ -613,6 +613,36 @@ function conectar() {
   ws.onerror = () => ws.close();
 }
 
+// ---- Wake Lock: evita que la pantalla/PC se suspenda mientras el panel
+// esté abierto (mismo mecanismo que usa un video de YouTube reproduciendo,
+// pero explícito — acá no hay audio/video sonando todo el tiempo, así que
+// no podemos depender de eso). Requiere secure context (localhost o
+// HTTPS) — si no está disponible, se degrada en silencio sin romper nada.
+let wakeLock = null;
+
+async function pedirWakeLock() {
+  if (!("wakeLock" in navigator)) {
+    console.warn("Wake Lock API no disponible (¿navegador viejo, o ni localhost ni HTTPS?).");
+    return;
+  }
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    console.log("Wake Lock activo — la pantalla no debería suspenderse mientras esta pestaña esté visible.");
+  } catch (err) {
+    console.error("No se pudo activar Wake Lock:", err);
+  }
+}
+
+// El wake lock se libera solo cuando la pestaña deja de estar visible —
+// hay que volver a pedirlo cuando vuelve a estar en primer plano.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    pedirWakeLock();
+  }
+});
+
+pedirWakeLock();
+
 restaurarSwitch("toggle-secuencial", "tracking-gps-vhf:reproducir-en-secuencia");
 restaurarSwitch("toggle-escuchar-vivo", "tracking-gps-vhf:escuchar-en-vivo");
 
