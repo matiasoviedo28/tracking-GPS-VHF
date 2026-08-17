@@ -10,15 +10,52 @@
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
     crossorigin=""
   />
+  <!-- Solo la monoespaciada viene de CDN (radio_id/timestamps) — la sans
+       general usa system-ui, sin depender de Google Fonts (ver style.css). -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="map"></div>
   <div id="status" class="status status--connecting">Conectando al backend…</div>
 
-  <div id="panel-equipos" class="panel-equipos">
-    <h2>Equipos</h2>
-    <ul id="lista-equipos" class="lista-equipos"></ul>
+  <div id="panel-audio" class="panel panel-audio">
+    <div class="panel-header">
+      <h2>Bitácora de audio <span id="contador-audio" class="panel-contador">0</span></h2>
+      <div class="switches-audio">
+        <label class="switch" title="Al terminar un clip, arranca automáticamente el siguiente de la lista">
+          <input type="checkbox" id="toggle-secuencial" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-label">Reproducir en secuencia</span>
+        </label>
+        <label class="switch" title="Los clips nuevos que lleguen se reproducen solos, apenas llegan">
+          <input type="checkbox" id="toggle-escuchar-vivo" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span class="switch-label">Escuchar en vivo</span>
+        </label>
+      </div>
+    </div>
+    <div class="panel-body">
+      <ul id="lista-audio" class="lista-audio"></ul>
+    </div>
+  </div>
+
+  <div id="panel-equipos" class="panel panel-equipos">
+    <div class="panel-header">
+      <h2>Equipos <span id="contador-equipos" class="panel-contador">0</span></h2>
+      <div id="sdr-status-indicator" class="sdr-status-indicator sdr-status--sin_datos" title="Cargando estado del SDR…">
+        <span class="sdr-status-dot"></span>
+        <span class="sdr-status-texto">SDR</span>
+      </div>
+    </div>
+    <div class="panel-body">
+      <ul id="lista-equipos" class="lista-equipos"></ul>
+    </div>
   </div>
 
   <script

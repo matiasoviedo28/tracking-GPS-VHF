@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import Base, engine
-from app.routers import equipos, presence, telemetry
+from app.routers import audio_eventos, equipos, presence, sdr_status, telemetry
 
 Base.metadata.create_all(bind=engine)
 
@@ -18,6 +18,8 @@ app.add_middleware(
 app.include_router(telemetry.router)
 app.include_router(presence.router)
 app.include_router(equipos.router)
+app.include_router(audio_eventos.router)
+app.include_router(sdr_status.router)
 
 
 @app.get("/health")
