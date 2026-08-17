@@ -24,14 +24,17 @@ el documento, no el tamaño real del archivo.
 
 - **Modelo**: Motorola DGP8550 — confirmado por el usuario en el codeplug de
   uno de estos equipos (ver `../sdr-decoder/INVESTIGACION_LRRP.md`).
-- **radio_id vistos transmitiendo hasta ahora**: `1001`, `1002`, `1004`, `1006`
-  (dentro del rango 1001-1006 asignado a este modelo; `1003` y `1005` son parte
-  del rango pero todavía no se los vio transmitir).
+- **radio_id vistos transmitiendo hasta ahora**: `1001`, `1002`, `1003`,
+  `1004`, `1005`, `1006` — con esto ya se completó todo el rango 1001-1006
+  asignado a este modelo.
   - `1001` — alias conocido: **Matías**.
   - `1002` — alias conocido: **BVM1002**.
-  - `1004`, `1006` — sin alias humano asignado todavía (aparecen en el panel
-    mostrando el propio `radio_id` como alias, comportamiento default cuando
-    no hay uno cargado — ver `API.md`).
+  - `1003`, `1004`, `1005`, `1006` — sin alias humano asignado todavía
+    (aparecen en el panel mostrando el propio `radio_id` como alias,
+    comportamiento default cuando no hay uno cargado — ver `API.md`).
+  - `1005` transmitió con evento `emergencia` (no `voz` normal) en su primera
+    detección (2026-08-17) — pendiente confirmar si es un botón de pánico del
+    equipo o una prueba puntual.
 
 ### Características / hallazgos
 - **Codeplug**: el canal de voz normal usa Timeslot 1. Existe un canal
@@ -93,6 +96,50 @@ el documento, no el tamaño real del archivo.
 
 ---
 
+## Baofeng UV-32 — handy personal, radio_id 1
+
+- **Modelo**: Baofeng UV-32 — confirmado por el usuario. Es un equipo
+  personal de un efectivo (no parte del parque de equipos del cuartel), DMR y
+  **con GPS**.
+- **radio_id**: `1`.
+
+### Características / hallazgos
+- Primera detección: 2026-08-17, 10 líneas seguidas en un mismo bloque con
+  `TGT=1 SRC=1` (el equipo aparece como su propio destinatario) — en su
+  momento se marcó como posible artefacto de decodificación por lo atípico
+  del patrón, pero el usuario confirmó que el equipo es real. Queda pendiente
+  de entender si `TGT=1` es simplemente el grupo/canal en el que está
+  programado (coincide con su propio `radio_id` por casualidad) o algo propio
+  de cómo este modelo arma el `Group Call`.
+- 🎯 **GPS: mecanismo confirmado, y NO es LRRP.** El 2026-08-17 el usuario usó
+  la función "Send → Contacts" del handy hacia el contacto `radio_id 1007`.
+  El UV-32 manda la posición como **texto plano UTF-16LE dentro de un
+  paquete UDP** (puerto 4007↔4007) — no como LRRP/LOCN, el protocolo que se
+  venía investigando desde el principio con los demás equipos. Se pudo
+  capturar el contenido (`Lat: 32°20'26. / Long: 65°1'28.9" / Speed: 0KM/H`,
+  ≈ -32.3406, -65.0247) porque `1007` no tenía el puerto UDP escuchando y
+  devolvió un error ICMP "Port Unreachable" que incluyó de vuelta el paquete
+  original — detalle completo, timestamps y hexdump en
+  `../sdr-decoder/INVESTIGACION_LRRP.md`, sección "🎯 HITO — Primera
+  coordenada GPS real capturada". **Es un hallazgo forense, no
+  automatizado**: el bridge no reconoce este patrón todavía, así que la
+  coordenada no llegó al mapa ni a la base de datos.
+- **Relación con `radio_id 529385`** (ver "Sin identificar todavía" más
+  abajo): ambos son sospechados de ser equipos Baofeng usados por un
+  "efectivo personal", pero **no está confirmado si son el mismo handy
+  físico o dos unidades distintas** — pendiente de una prueba que
+  identifique a `529385` sin error de CRC para poder compararlo.
+
+### Nota — `radio_id 1007` no es un equipo del sistema
+`1007` apareció únicamente como **destinatario** de los paquetes de datos
+descriptos arriba — nunca transmitió nada por sí mismo (ni voz, ni ARS, ni
+presencia), y no figura en `GET /api/equipos`. Es el contacto configurado en
+la agenda del UV-32 al que se le mandó el GPS, no un radio activo del
+cuartel. No agregarlo como equipo catalogado a menos que en algún momento
+transmita algo por su cuenta.
+
+---
+
 ## Motorola DEP450 — pendiente de identificar (sin radio_id conocido todavía)
 
 <img src="images/MOTOROLA_dep450.png" alt="Motorola DEP450" width="220">
@@ -150,4 +197,16 @@ el documento, no el tamaño real del archivo.
   inmediatamente antes y después no muestran ninguna otra actividad. **No
   confirmado si es un equipo real** — pendiente de una nueva transmisión
   (idealmente sin nadie más hablando al mismo tiempo) para confirmar con una
-  decodificación limpia, sin error de CRC.
+  decodificación limpia, sin error de CRC. Posible relación con el Baofeng
+  UV-32 (`radio_id 1`, ver más arriba) — no confirmado si es el mismo equipo.
+
+---
+
+## Próximos pasos generales
+
+- Evaluar si vale la pena implementar en el bridge una detección automática
+  del patrón de GPS en texto plano descubierto en el Baofeng UV-32 (paquete
+  UDP + texto con `Lat:`/`Long:`/`Speed:`) — es un camino de GPS funcional ya
+  confirmado, independiente del bloqueo de TLS-PSK que afecta a LRRP en el
+  resto de los equipos (ver `../sdr-decoder/INVESTIGACION_LRRP.md`, sección
+  "🎯 HITO — Primera coordenada GPS real capturada").

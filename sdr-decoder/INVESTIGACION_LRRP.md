@@ -1184,3 +1184,57 @@ Esto es un dato a favor de la hipótesis de fondo, no en contra: hasta ahora, la
 1. Sigue en pie la pregunta de fondo: conseguir algún mecanismo para generar (o interceptar) la solicitud activa de Location Server, dado que ya hay dos fabricantes distintos mostrando el mismo comportamiento pasivo.
 2. Si en el futuro aparece un tercer equipo (de otro fabricante o modelo) con el mismo patrón, vale la pena empezar a tratar esto casi como confirmado en vez de "hipótesis reforzada".
 3. El hito de containerización en sí no requiere más validación — quedó demostrado con un caso real no coordinado. Cualquier ajuste futuro al bridge (ver sección de "pérdida de audio en el hueco entre bloques" más arriba) parte de esta base ya confirmada como funcional de forma autónoma.
+
+---
+
+## 🎯 HITO — Primera coordenada GPS real capturada
+
+**Contexto**: hasta este punto, toda la investigación de posición se había concentrado en LRRP/LOCN — el protocolo de Location Server que, según la hipótesis de las sesiones anteriores, está bloqueado por la autenticación TLS-PSK de la repetidora (ver "Investigación de código" y el hito anterior). El 2026-08-17 el usuario probó un handy prestado, un **Baofeng UV-32** (`radio_id 1`, DMR + GPS), usando su función **"Send → Contacts" (Short Contact)** hacia un contacto con `radio_id 1007`. El propio handy mostró "Msg Received" en pantalla. Minutos después hizo también un PTT de voz normal ("hola probando").
+
+Investigación de solo lectura sobre los bloques ya capturados por el `sdr-decoder` corriendo en Docker — sin coordinar nada en tiempo real, mismo patrón desatendido que el hito anterior.
+
+### El mecanismo real: esto NO es LRRP
+
+El UV-32 **no usa LRRP/LOCN** para mandar su posición. La manda como **texto plano UTF-16LE dentro de un paquete UDP** (puerto 4007↔4007), como un mensaje de datos DMR común (`Individual Data`) — no como un protocolo de localización dedicado.
+
+### Por qué se pudo ver esto en el aire (y por qué normalmente no se vería)
+
+El contacto `1007` **no tenía nada escuchando en el puerto UDP 4007**. Su stack de red respondió automáticamente con un **ICMP "Destination Unreachable — Port Unreachable"** — y ese tipo de mensaje de error, por especificación estándar de ICMP, **incluye una copia del paquete original que lo provocó**. Esa copia (con el texto de la posición adentro) volvió a viajar por el aire de `1007` hacia `1`, y eso fue lo que capturó el sistema.
+
+**Es un hallazgo casi accidental**: si `1007` hubiera tenido una aplicación real escuchando ese puerto (lo esperable en un sistema de despacho funcionando), el paquete se habría consumido silenciosamente del lado de la red y esto **nunca se habría visto por RF**. No es una confirmación de que el GPS del UV-32 sea "visible" en general — es la confirmación de que, cuando el destino rechaza el paquete, el contenido rebota y se puede capturar.
+
+### Los bloques de captura
+
+- `bloque_3425_20260817_170256_496195.log` y `bloque_3426_20260817_170310_881933.log` (17:02:56–17:03:24 UTC).
+- Ambos bloques decodificaron el mismo paquete IP (mismo ID de fragmentación `0xB243`) con flag **`Multi Block PDU Message CRC32 ERR`** — cada captura individual falló su propio chequeo de integridad.
+- La corrupción de bits cayó en tramos **distintos** de cada copia — cruzando ambas se pudo reconstruir el texto completo sin ambigüedad, incluyendo el tramo "Speed:" que en una sola copia era ilegible.
+
+### Contenido reconstruido (UTF-16LE)
+
+```
+Lat:
+32°20'26.
+Long:
+65°1'28.9"
+Speed:
+0KM/H
+```
+
+Convertido a grados decimales: **≈ -32.3406, -65.0247** — coherente con la ubicación real del usuario en Merlo, San Luis.
+
+### Actividad posterior
+
+Entre las 17:03 y las 17:09 UTC se repitieron ~25 paquetes UDP cortos (13 bytes, contenido todo en cero) cada ~14 segundos, con el mismo patrón de rebote ICMP — interpretados como intentos del handy de mantener viva la "conexión" en el puerto 4007, sin más datos de posición adentro (tráfico de mantenimiento de sesión, no una segunda coordenada).
+
+### Estado actual: hallazgo forense, no automatizado
+
+Este hallazgo es **100% manual**, reconstruido a mano sobre los logs crudos de `dsd-fme`. El `live_presence_bridge.py` **no reconoce este patrón todavía** — no hay ningún parser que busque paquetes UDP con este contenido, así que la coordenada **no llegó a `POST /api/telemetry`, no está en la base de datos, y no se vio en el mapa**. Es un dato encontrado después de los hechos, no una captura en vivo del sistema productivo.
+
+### Por qué es el hallazgo más importante del proyecto hasta ahora
+
+En contraste con las 17+ sesiones invertidas en LRRP/LOCN sobre los Motorola DGP8550 y la base 1012 — sin un solo resultado, bloqueadas (según la hipótesis vigente) por TLS-PSK del lado de la red — **este es un camino de GPS completamente distinto**, específico de este Baofeng UV-32, que **no depende en absoluto de resolver el TLS-PSK de la repetidora**: es tráfico de datos DMR común, visible con el mismo `sdr-decoder` que ya está corriendo, sin necesitar acceso a la capa de red protegida. Es la primera vez en todo el proyecto que se ve una coordenada GPS real, de un equipo real, en el aire.
+
+### Próximos pasos
+1. Evaluar si vale la pena implementar en el bridge una detección automática de este patrón (paquete UDP + texto con `Lat:`/`Long:`/`Speed:`), dado que es un camino de GPS funcional ya confirmado, independiente del bloqueo de TLS-PSK que afecta a LRRP.
+2. Confirmar si `radio_id 1` (visto en esta sesión) y `radio_id 529385` (detección anterior, con error de CRC, sospechada de ser un Baofeng) son el mismo equipo físico o dos unidades distintas — ver `docs/Equipos.md`.
+3. Si se decide automatizar: definir si el mecanismo de "provocar" el rebote ICMP es reproducible a demanda (¿alcanza con que el destino no tenga el puerto abierto?) o si fue una coincidencia de esta prueba puntual.
