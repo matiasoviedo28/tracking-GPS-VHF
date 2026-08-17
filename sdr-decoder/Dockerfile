@@ -87,7 +87,7 @@ COPY --from=build /usr/local/lib/libmbe.so* /usr/local/lib/
 RUN ldconfig
 
 WORKDIR /app
-COPY live_presence_bridge.py iq_to_wav.py ./
+COPY live_presence_bridge.py iq_to_wav.py baofeng_gps_parser.py test_baofeng_gps_parser.py ./
 
 # Directorios de trabajo del bridge (ver live_presence_bridge.py): bloques
 # temporales de IQ/WAV (se borran solos) y logs crudos por bloque

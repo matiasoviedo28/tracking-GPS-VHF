@@ -72,6 +72,8 @@ from pathlib import Path
 
 import numpy as np
 
+from baofeng_gps_parser import BaofengGpsDetector
+
 sys.stdout.reconfigure(line_buffering=True)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -105,6 +107,16 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://backend:8000")
 PRESENCE_ENDPOINT = f"{BACKEND_URL}/api/presence"
 AUDIO_EVENTOS_ENDPOINT = f"{BACKEND_URL}/api/audio-eventos"
 SDR_STATUS_ENDPOINT = f"{BACKEND_URL}/api/sdr-status"
+TELEMETRY_ENDPOINT = f"{BACKEND_URL}/api/telemetry"
+
+# GPS "en texto plano" de un Baofeng UV-32, vía rebote ICMP de un paquete
+# UDP (ver baofeng_gps_parser.py e INVESTIGACION_LRRP.md, sección "🎯 HITO
+# — Primera coordenada GPS real capturada"). ⚠️ Mecanismo OPORTUNISTA: solo
+# funciona mientras el destinatario del mensaje no tenga el puerto UDP
+# escuchando (lo que provoca el rebote que capturamos). Si eso deja de
+# pasar, este detector deja de encontrar algo y no hay forma de saberlo
+# desde acá — no tratar esto como un reemplazo confiable de LRRP.
+BAOFENG_GPS_DETECTOR = BaofengGpsDetector()
 
 # Bitácora de audio: bytes de un WAV vacío (solo header, sin frames de
 # audio) que escribe dsd-fme con "-w" cuando no decodificó nada en el
@@ -197,6 +209,41 @@ def enviar_presencia(radio_id: str, evento: str) -> None:
         print(f"  [{etiqueta}] evento={evento} -> ERROR {exc.code}: {detalle}", flush=True)
     except urllib.error.URLError as exc:
         print(f"  [{etiqueta}] evento={evento} -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
+
+
+def enviar_telemetry(radio_id: str, lat: float, lon: float, velocidad_kmh, timestamp_iso: str) -> None:
+    """POST a /api/telemetry (ver docs/API.md) — usado por el detector de
+    GPS en texto plano del Baofeng UV-32 (`baofeng_gps_parser.py`). A
+    diferencia de /api/presence, `radio_alias` es un campo requerido por
+    el contrato — si no hay uno cargado en ALIAS_CONOCIDOS, se manda el
+    propio radio_id como alias (mismo comportamiento default que ya
+    aplica el backend en /api/presence)."""
+    alias = ALIAS_CONOCIDOS.get(radio_id, radio_id)
+    payload = {
+        "radio_id": radio_id,
+        "radio_alias": alias,
+        "lat": lat,
+        "lon": lon,
+        "timestamp": timestamp_iso,
+    }
+    if velocidad_kmh is not None:
+        payload["velocidad"] = velocidad_kmh
+
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        TELEMETRY_ENDPOINT,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as resp:
+            print(f"  [{alias}] telemetría GPS (Baofeng, texto plano) -> POST {resp.status}", flush=True)
+    except urllib.error.HTTPError as exc:
+        detalle = exc.read().decode("utf-8", "replace")
+        print(f"  [{alias}] telemetría GPS (Baofeng, texto plano) -> ERROR {exc.code}: {detalle}", flush=True)
+    except urllib.error.URLError as exc:
+        print(f"  [{alias}] telemetría GPS (Baofeng, texto plano) -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
 
 
 def enviar_estado_sdr(status: str, detalle: str) -> None:
@@ -522,6 +569,35 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> dict:
                     continue
                 ultimo_post[radio_id] = ahora
                 enviar_presencia(radio_id, "gps")
+
+        hallazgos_baofeng = BAOFENG_GPS_DETECTOR.procesar_bloque(salida)
+        for hallazgo in hallazgos_baofeng:
+            if not hallazgo["completo"]:
+                print(
+                    f"  [Baofeng GPS] hallazgo parcial de radio_id={hallazgo['radio_id']} "
+                    f"(campos incompletos, no se postea): {hallazgo['campos']}",
+                    flush=True,
+                )
+                continue
+            print("\n" + "#" * 70, flush=True)
+            print(f"### 🎯 GPS BAOFENG (texto plano vía rebote ICMP) — BLOQUE {indice} 🎯", flush=True)
+            print("#" * 70, flush=True)
+            print(
+                f"### radio_id={hallazgo['radio_id']} (rebotado vía contacto {hallazgo['radio_id_contacto']}) "
+                f"lat={hallazgo['lat']} lon={hallazgo['lon']} vel={hallazgo['velocidad_kmh']}",
+                flush=True,
+            )
+            print(
+                f"### reconstruido_cruzando_bloques={hallazgo['reconstruido_cruzando_bloques']} "
+                f"crc_error_residual={hallazgo['crc_error']}",
+                flush=True,
+            )
+            print(f"### log crudo completo guardado en: {LOGS_DIR.name}/bloque_{indice:04d}_{ts}.log", flush=True)
+            print("#" * 70 + "\n", flush=True)
+            enviar_telemetry(
+                hallazgo["radio_id"], hallazgo["lat"], hallazgo["lon"],
+                hallazgo["velocidad_kmh"], bloque_inicio_iso,
+            )
 
         if not eventos:
             estado = "sync CC=01 pero sin evento reconocido" if hubo_sync else "sin actividad"

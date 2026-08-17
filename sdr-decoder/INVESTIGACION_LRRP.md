@@ -1235,6 +1235,153 @@ Este hallazgo es **100% manual**, reconstruido a mano sobre los logs crudos de `
 En contraste con las 17+ sesiones invertidas en LRRP/LOCN sobre los Motorola DGP8550 y la base 1012 — sin un solo resultado, bloqueadas (según la hipótesis vigente) por TLS-PSK del lado de la red — **este es un camino de GPS completamente distinto**, específico de este Baofeng UV-32, que **no depende en absoluto de resolver el TLS-PSK de la repetidora**: es tráfico de datos DMR común, visible con el mismo `sdr-decoder` que ya está corriendo, sin necesitar acceso a la capa de red protegida. Es la primera vez en todo el proyecto que se ve una coordenada GPS real, de un equipo real, en el aire.
 
 ### Próximos pasos
-1. Evaluar si vale la pena implementar en el bridge una detección automática de este patrón (paquete UDP + texto con `Lat:`/`Long:`/`Speed:`), dado que es un camino de GPS funcional ya confirmado, independiente del bloqueo de TLS-PSK que afecta a LRRP.
+1. ~~Evaluar si vale la pena implementar en el bridge una detección automática de este patrón~~ — **hecho, ver actualización más abajo.**
 2. Confirmar si `radio_id 1` (visto en esta sesión) y `radio_id 529385` (detección anterior, con error de CRC, sospechada de ser un Baofeng) son el mismo equipo físico o dos unidades distintas — ver `docs/Equipos.md`.
-3. Si se decide automatizar: definir si el mecanismo de "provocar" el rebote ICMP es reproducible a demanda (¿alcanza con que el destino no tenga el puerto abierto?) o si fue una coincidencia de esta prueba puntual.
+3. Definir si el mecanismo de "provocar" el rebote ICMP es reproducible a demanda (¿alcanza con que el destino no tenga el puerto abierto?) o si fue una coincidencia de esta prueba puntual — solo se puede confirmar con una transmisión nueva, coordinada, en una sesión aparte.
+
+---
+
+### 🔧 Actualización — detección automatizada en el bridge
+
+Se implementó `sdr-decoder/baofeng_gps_parser.py`, que replica en código la
+reconstrucción manual descripta arriba: reconoce bursts "Individual Data"
+que decodifican como un paquete ICMP "Destination Unreachable — Port
+Unreachable" (tipo 3), extrae el paquete UDP original embebido, decodifica
+el payload como texto UTF-16LE, y parsea sus campos de forma genérica (no
+asume que son solo `Lat`/`Long`/`Speed` — cualquier etiqueta nueva que
+aparezca en una captura futura queda igual disponible en el resultado). Si
+la misma captura (mismo ID de paquete IP exterior) aparece corrupta en un
+bloque y limpia (o menos corrupta) en el bloque siguiente, el detector las
+cruza automáticamente — el mismo mecanismo que se hizo a mano para este
+hito, ahora en código.
+
+**Test de regresión obligatorio (antes de tocar el bridge en vivo)**:
+`sdr-decoder/test_baofeng_gps_parser.py` corre el parser contra los dos
+bloques ya guardados de este hito (`bloque_3425_...` y `bloque_3426_...`),
+sin generar ninguna transmisión nueva, y confirma que reproduce exactamente
+lo ya reconstruido a mano:
+
+```
+radio_id == '1':                 True (obtenido: 1)
+radio_id_contacto == '1007':     True (obtenido: 1007)
+lat ≈ -32.3406 (±0.001):      True (obtenido: -32.340556)
+lon ≈ -65.0247 (±0.001):      True (obtenido: -65.024694)
+reconstruido cruzando bloques:   True
+
+PASS: el parser reproduce la coordenada del hito sin necesitar una transmisión nueva.
+```
+
+De paso, el parser también clasificó correctamente como **incompleto** (sin
+inventar lat/lon) uno de los paquetes UDP "keepalive" de 13 bytes vacíos
+que aparecen en el mismo bloque 3426 — confirma que no genera falsos
+positivos con el tráfico de mantenimiento de sesión ya documentado más
+arriba ("Actividad posterior").
+
+El parser quedó integrado a `live_presence_bridge.py`: por cada bloque
+procesado, además de voz/emergencia/ARS/LRRP, también corre este detector;
+si encuentra una coordenada completa, hace `POST /api/telemetry` con
+`radio_id` = el Source real del paquete UDP original (el equipo con GPS,
+no el contacto que rebotó el ICMP), y loguea el hallazgo de forma visible
+(🎯), igual que ya se hacía con los hallazgos de LRRP.
+
+**⚠️ Sigue siendo oportunista, no una solución robusta ni permanente.**
+Esto no cambia por estar automatizado: sigue dependiendo por completo de
+que el destinatario del mensaje no tenga el puerto UDP 4007 escuchando. Si
+eso deja de pasar, el detector simplemente no encuentra nada — no hay
+ningún error ni aviso que lo distinga de "no hubo transmisión". No se debe
+comunicar ni documentar esto como un reemplazo confiable de LRRP en ningún
+contexto (interno o de cara al cuartel).
+
+No se hizo ninguna prueba en vivo con el Baofeng para validar esta
+integración — el test de regresión contra los bloques ya guardados fue
+suficiente para confirmar que el parser funciona. Una prueba en vivo
+(nueva transmisión, bridge corriendo, verificar que llega a `GET
+/api/equipos` y al mapa) queda pendiente para una sesión aparte, cuando
+haya oportunidad de coordinarla.
+
+---
+
+## 🎯 HALLAZGO — El mismo canal expone mensajes de texto, no solo GPS
+
+**Contexto**: durante la prueba en vivo del detector automatizado (ver
+actualización arriba), el usuario mandó una posición GPS desde el Baofeng
+UV-32 (`radio_id 1`) hacia el contacto `radio_id 1001` (Matías) en vez de
+`1007`. El detector automatizado no encontró nada — investigando por qué
+(de solo lectura, sobre los bloques ya guardados) se encontró algo más
+importante que el motivo puntual del fallo: **`1001` sí tiene algo
+escuchando en el puerto UDP 4007** (a diferencia de `1007`), y respondió
+con un mensaje de texto propio, capturado igual de expuesto que el GPS.
+
+Para confirmarlo sin ambigüedad, en una prueba de seguimiento el usuario
+mandó un mensaje de texto literal ("Test123") **desde su HT `1001`
+(Matías) hacia el Baofeng UV-32 (`radio_id 1`)** usando la función de
+mensajería del handy — sin nada de GPS de por medio.
+
+### Lo que se encontró
+
+`bloque_0028_20260817_214606_903898.log`, 21:46:21 UTC — burst "Individual
+Data", `Source: 1001 Target: 1`, `Confirmed Delivery - Response
+Requested`, marcado `Multi Block PDU Message CRC32 ERR` por `dsd-fme`.
+
+Decodificando el paquete IP/UDP embebido:
+- Origen: `12.0.3.233` = `0x03E9` = **1001** (Matías).
+- Destino: `12.0.0.1` = `0x0001` = **1** (Baofeng UV-32).
+- **UDP directo** (puerto 4007 → 2155) — a diferencia del hallazgo de GPS,
+  esta vez **no** hubo rebote ICMP: el paquete viajó directo entre los dos
+  equipos y se capturó tal cual, sin necesitar ningún error de red de por
+  medio.
+- Payload UTF-16LE reconstruido: `\n` + `T` + `e` + `s` + `t` + `1` + `2` +
+  `3` = **"Test123"** — coincide exactamente con lo que el usuario
+  confirmó haber mandado. De los 8 caracteres, 6 decodificaron perfectos y
+  2 tenían corrupción de **un solo bit cada uno** (la 'e' con el byte alto
+  corrido, la 's' con el byte bajo invertido en un bit: `0x73 XOR 0x33 =
+  0x40`) — consistente con señal marginal, no con ruido aleatorio.
+
+### Por qué es un hallazgo aparte del GPS, no una repetición
+
+El mecanismo de captura del GPS (`baofeng_gps_parser.py`) está construido
+específicamente para reconocer el **rebote ICMP** cuando el destinatario
+rechaza el paquete. Este mensaje de texto **no pasó por ese camino en
+absoluto** — viajó como un UDP directo, aceptado y respondido por `1001`,
+sin ningún rechazo de red. Es decir: **la exposición no depende de que el
+mensaje rebote** — cualquier transmisión de datos de este tipo (texto o
+GPS) que el sistema logre capturar y decodificar, con suficiente calidad
+de señal, revela su contenido en texto plano. El rebote ICMP del hito
+anterior fue *una* forma de verlo, no la única.
+
+### Alcance real: no es "GPS expuesto", es "cualquier mensaje corto expuesto"
+
+Esto generaliza el hallazgo del hito anterior más allá de la posición:
+**cualquier mensaje de texto corto mandado con la función "Send" de un
+handy compatible con este esquema (Baofeng UV-32 confirmado; sin
+confirmar todavía en otros modelos) viaja en texto plano UTF-16LE dentro
+de DMR, sin cifrar** — se trate de una coordenada GPS o de un mensaje
+escrito a mano como este. No hace falta un error de red para verlo: alcanza
+con que `dsd-fme` decodifique el burst con suficiente calidad.
+
+### Estado: hallazgo forense manual, no automatizado
+
+`baofeng_gps_parser.py` **no reconoce este caso** — su lógica de
+extracción exige que el paquete exterior sea ICMP (protocolo 1); un UDP
+directo como este (protocolo 0x11 sin envoltorio ICMP) no pasa ese filtro
+y el detector no lo ve. Este mensaje se decodificó completamente a mano,
+igual que el GPS del hito original antes de automatizarlo.
+
+### Próximos pasos
+1. Evaluar si vale la pena extender `baofeng_gps_parser.py` para reconocer
+   también paquetes UDP directos (sin envoltorio ICMP) con el mismo
+   prefijo de aplicación (`SAP 04 [IP Based]`, puerto 4007) — ampliaría la
+   detección de "solo coordenadas rebotadas" a "cualquier mensaje de texto
+   capturado con suficiente calidad", sea GPS o no.
+2. Si se implementa, definir qué hacer con el contenido de un mensaje de
+   texto arbitrario (no es una posición, no encaja en `/api/telemetry`) —
+   probablemente un evento nuevo o un campo separado, a decidir antes de
+   automatizar nada.
+3. Tener en cuenta la implicancia de privacidad/seguridad: cualquier
+   mensaje de texto mandado por este canal entre handies compatibles es,
+   en los hechos, texto plano interceptable — no es exclusivo de este
+   sistema de investigación, es una característica (o falla) del propio
+   protocolo/firmware del handy. No comunicar esto como una vulnerabilidad
+   de `tracking-GPS-VHF` — es una propiedad del hardware/firmware de
+   terceros, que este proyecto simplemente puede observar por estar
+   escuchando el aire.
