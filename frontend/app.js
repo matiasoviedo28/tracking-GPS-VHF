@@ -49,10 +49,53 @@ const CENTRO_MERLO = [-32.3436, -65.0128];
 const map = L.map("map", { zoomControl: false }).setView(CENTRO_MERLO, 13);
 L.control.zoom({ position: "bottomleft" }).addTo(map);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: "&copy; OpenStreetMap contributors",
-}).addTo(map);
+// Capas base seleccionables (ver control-capas en index.html) — ninguna se
+// agrega al mapa acá, eso lo hace inicializarSelectorCapas() más abajo.
+const CAPAS_BASE = {
+  calle: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  }),
+  satelite: L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    {
+      maxZoom: 19,
+      attribution: "Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+    }
+  ),
+};
+
+const CAPA_MAPA_STORAGE_KEY = "tracking-gps-vhf:capa-mapa";
+let capaMapaActual = null;
+
+function setCapaMapa(nombre) {
+  if (!CAPAS_BASE[nombre] || nombre === capaMapaActual) return;
+  if (capaMapaActual) map.removeLayer(CAPAS_BASE[capaMapaActual]);
+  CAPAS_BASE[nombre].addTo(map);
+  capaMapaActual = nombre;
+  document.querySelectorAll(".capa-btn").forEach((btn) => {
+    btn.classList.toggle("capa-btn--activo", btn.dataset.capa === nombre);
+  });
+  try {
+    localStorage.setItem(CAPA_MAPA_STORAGE_KEY, nombre);
+  } catch (err) {
+    console.error(`No se pudo guardar ${CAPA_MAPA_STORAGE_KEY} en localStorage:`, err);
+  }
+}
+
+function inicializarSelectorCapas() {
+  let inicial = "calle";
+  try {
+    const guardada = localStorage.getItem(CAPA_MAPA_STORAGE_KEY);
+    if (guardada && CAPAS_BASE[guardada]) inicial = guardada;
+  } catch (err) {
+    console.error(`No se pudo leer ${CAPA_MAPA_STORAGE_KEY} de localStorage:`, err);
+  }
+  setCapaMapa(inicial);
+  document.querySelectorAll(".capa-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setCapaMapa(btn.dataset.capa));
+  });
+}
 
 const marcadores = new Map(); // equipo_id -> L.Marker
 
@@ -480,9 +523,13 @@ function upsertEquipoEstado(datos) {
 
 function renderPanelEquipos() {
   const lista = document.getElementById("lista-equipos");
-  const equipos = Array.from(equiposEstado.values()).sort((a, b) =>
-    (a.alias || "").localeCompare(b.alias || "")
-  );
+  // Más reciente primero (no alfabético) — un equipo sin ultimo_visto
+  // todavía (nunca visto) se va al final, no al principio.
+  const equipos = Array.from(equiposEstado.values()).sort((a, b) => {
+    const tA = a.ultimo_visto ? a.ultimo_visto.getTime() : 0;
+    const tB = b.ultimo_visto ? b.ultimo_visto.getTime() : 0;
+    return tB - tA;
+  });
 
   const contador = document.getElementById("contador-equipos");
   if (contador) contador.textContent = String(equipos.length);
@@ -645,6 +692,7 @@ pedirWakeLock();
 
 restaurarSwitch("toggle-secuencial", "tracking-gps-vhf:reproducir-en-secuencia");
 restaurarSwitch("toggle-escuchar-vivo", "tracking-gps-vhf:escuchar-en-vivo");
+inicializarSelectorCapas();
 
 cargarEquiposIniciales();
 cargarAudioEventosIniciales();

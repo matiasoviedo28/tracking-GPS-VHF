@@ -1156,3 +1156,31 @@ El diseño actual es **secuencial**: grabar 12s → convertir → decodificar �
 - Esto requiere manejar la sincronización entre "grabación en curso" y "bloques ya grabados pendientes de procesar" (una cola simple alcanzaría, dado el volumen bajo de bloques por minuto).
 
 No se implementa en esta investigación (era de solo lectura/análisis) — queda como mejora concreta y ya justificada con datos reales para una futura sesión, si se decide que vale la pena la complejidad adicional frente al enfoque secuencial actual (que ya viene priorizando simplicidad sobre cobertura completa, ver Sesión 12).
+
+---
+
+## Hito — primera captura real sin coordinación: la containerización cumplió su objetivo
+
+**Contexto**: hasta acá, cada transmisión analizada en este documento fue **coordinada en tiempo real** — el usuario avisaba "voy a transmitir ahora", alguien miraba la consola en el momento, y recién ahí se confirmaba sync/detección. Esta vez fue distinto a propósito: el usuario transmitió con un equipo nuevo (radio_id `1012`, una base genérica compatible DMR/GPS de un fabricante distinto a Motorola) sin coordinar nada con quien estuviera del lado del sistema — el mismo `sdr-decoder` corriendo solo en Docker desde la sesión de containerización, sin que nadie estuviera mirando la consola en ese momento.
+
+### Lo que se encontró (investigación de solo lectura, ver más arriba en este mismo documento)
+
+- El bloque real (`bloque_0060_20260817_002310_570212.log`, guardado por el propio contenedor sin intervención) contiene tráfico genuino: `SRC=1012`, `Group Call`, Color Code=01 real. Re-procesado con la función de parsing actual (`parsear_bloque`, sin ejecutar nada nuevo): 50 líneas de burst, clasificadas como `voz`.
+- `GET /api/equipos` ya tenía el equipo persistido, con `ultimo_visto: "2026-08-17T00:23:24.876462Z"` — **coincide al milisegundo** con el timestamp del header del bloque crudo (`2026-08-17T00:23:24.875588`). Circuito completo (SDR → parsing → `POST /api/presence` → backend → `GET /api/equipos`) funcionando de punta a punta, sin ningún humano coordinando el momento exacto.
+
+### 🎯 Por qué esto es el hito principal de toda la etapa de containerización
+
+Todas las sesiones anteriores (12 en adelante) que probaron el bridge —incluida la propia sesión de containerización— dependieron de coordinación en tiempo real: alguien avisaba el PTT, alguien miraba la consola al instante, se confirmaba sync antes de seguir. Esta es la **primera vez que el sistema captura, clasifica y persiste correctamente una transmisión real sin que nadie supiera que iba a pasar ni estuviera mirando en el momento**. Es exactamente el objetivo declarado al pasar de "correr `live_presence_bridge.py` a mano en el host, con alguien pendiente" a "`docker compose up` levanta todo y queda corriendo solo, de forma desatendida" — y quedó confirmado con un caso real, no con una prueba dirigida.
+
+### Sobre el GPS/LRRP: mismo patrón, ahora con un fabricante distinto — refuerza la hipótesis, no abre una duda nueva
+
+El equipo `1012` es, según indicó el usuario, una base que **sí incluye GPS** — y sin embargo transmitió voz normal, sin un solo token de LRRP/LOCN (búsqueda de los 5 strings conocidos sobre el bloque completo y sobre los 208 archivos de toda la corrida: cero coincidencias, igual que con todos los equipos Motorola DGP8550 vistos hasta ahora).
+
+Esto es un dato a favor de la hipótesis de fondo, no en contra: hasta ahora, la ausencia de LRRP se podía explicar (sin poder descartar del todo) como algo específico de los DGP8550 analizados — configuración de codeplug, limitación del modelo, etc. Que un **equipo de otro fabricante, que el usuario confirma que tiene GPS habilitado**, muestre exactamente el mismo comportamiento (voz sí, LRRP nunca) hace más difícil sostener que es un problema puntual de una marca o modelo — y es consistente con la hipótesis ya documentada en la Sesión 5 y reforzada en la investigación de código (sección "Investigación de código" más arriba): que el reporte de posición LRRP depende de una **solicitud activa desde el lado de la red** (Location Server / NAI-D), bloqueada en este sistema por la autenticación TLS-PSK de la repetidora (sin la clave disponible) — independientemente de qué radio esté transmitiendo o si ese radio tiene GPS físicamente habilitado. Un handy o base con GPS y LRRP soportado no lo va a transmitir espontáneamente si nunca llega el pedido que lo dispara.
+
+**No se sobre-concluye**: esto es evidencia adicional a favor de una hipótesis ya en pie, no una confirmación definitiva — seguimos sin acceso directo a la capa de red protegida para probarlo de forma concluyente. Pero cada equipo nuevo que muestra el mismo patrón (voz sí, LRRP no) hace más lógico enfocar los próximos esfuerzos en el lado del pedido de red que en seguir sospechando de hardware específico.
+
+### Próximos pasos
+1. Sigue en pie la pregunta de fondo: conseguir algún mecanismo para generar (o interceptar) la solicitud activa de Location Server, dado que ya hay dos fabricantes distintos mostrando el mismo comportamiento pasivo.
+2. Si en el futuro aparece un tercer equipo (de otro fabricante o modelo) con el mismo patrón, vale la pena empezar a tratar esto casi como confirmado en vez de "hipótesis reforzada".
+3. El hito de containerización en sí no requiere más validación — quedó demostrado con un caso real no coordinado. Cualquier ajuste futuro al bridge (ver sección de "pérdida de audio en el hueco entre bloques" más arriba) parte de esta base ya confirmada como funcional de forma autónoma.

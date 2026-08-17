@@ -90,6 +90,44 @@ html, body {
   right: 10px;
 }
 
+/* ---- Selector de capa de mapa (calle/satélite) ----
+   Esquina inferior derecha: la única libre (arriba quedan los paneles de
+   audio/equipos, abajo izq. el control de zoom de Leaflet). */
+.panel-capas {
+  top: auto;
+  bottom: 10px;
+  right: 10px;
+  width: auto;
+  max-height: none;
+  flex-direction: row;
+  padding: 6px;
+  gap: 6px;
+}
+
+.capa-btn {
+  font-family: var(--fuente-sans);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--azul-borde);
+  border-radius: 6px;
+  background: var(--azul-noche);
+  color: var(--texto-claro);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.capa-btn:hover {
+  background: var(--azul-borde);
+}
+
+.capa-btn--activo {
+  background: var(--azul-cielo);
+  border-color: var(--azul-cielo);
+  color: var(--azul-noche);
+  font-weight: 600;
+}
+
 .panel-header {
   flex: 0 0 auto;
   background: var(--azul-noche);
@@ -532,6 +570,10 @@ html, body {
      entrar en ~la mitad del viewport, no solo achicarse un poco. */
   .panel {
     width: min(45vw, 220px);
+  }
+
+  .panel-capas {
+    width: auto;
   }
 
   .panel-header {
