@@ -50,6 +50,15 @@ resuelva, pero hoy no recibe datos reales.
 
 ![Vista general](./docs/images/FRONTED.png)
 
+**Posicionamiento en el mapa (ejemplo ilustrativo)**
+
+![Posición en el mapa](./docs/images/gps.png)
+
+*Captura de demostración: posición cargada manualmente vía `POST
+/api/telemetry` para documentar la funcionalidad de mapa lista para recibir
+datos GPS reales. No proviene de una captura LRRP real (ver "Estado del GPS
+de posición" más arriba) y no representa una posición real de ningún equipo.*
+
 ## Componentes
 
 El proyecto está dividido en cuatro servicios, orquestados con Docker Compose:
