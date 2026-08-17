@@ -35,32 +35,47 @@ obligatoriamente por `backend`, que es el único contenedor con acceso a la base
 | `database` | Persistencia de equipos, posiciones e histórico. |
 | `frontend` | Interfaz web con mapa interactivo, consumo de WebSocket + REST. |
 
-### SDR y Docker
+### SDR y Docker — **RESUELTO**, containerizado y validado contra hardware real
 
-El USB del SDR requiere passthrough directo al contenedor `sdr-decoder`
-(`--device=...`). Para evitar depender de un path de bus/puerto USB inestable entre
-reinicios o reconexiones, se define un identificador fijo por regla `udev` (ver
-sección 9).
+Dado que el pipeline de decodificación era la pieza de mayor incertidumbre técnica
+del proyecto, se prototipó primero en modo standalone (sin Docker, ver
+`sdr-decoder/INVESTIGACION_LRRP.md`) y se containerizó una vez que la
+decodificación fue estable — evitó mezclar dos fuentes de problemas nuevas al
+mismo tiempo (protocolo + containerización), tal como se había planeado acá.
 
-Dado que el pipeline de decodificación es la pieza de mayor incertidumbre técnica
-del proyecto, se prototipa primero en modo standalone (sin Docker) y se
-containeriza una vez que la decodificación sea estable — evita mezclar dos fuentes
-de problemas nuevas al mismo tiempo (protocolo + containerización).
+**Passthrough USB implementado**: se investigó (no se asumió) el mecanismo
+correcto para pasar el dongle al contenedor `sdr-decoder`. `--privileged` se
+descartó por exponer todo el host sin necesidad; en cambio, `docker-compose.yml`
+hace bind-mount de `/dev/bus/usb` completo (no de un nodo puntual, que se rompe
+con un replug al cambiar de bus/device) + `device_cgroup_rules: ["c 189:* rmw"]`
+(wildcard sobre el major USB) — esto permite que un replug del dongle (nuevo
+bus/device asignado por el kernel) siga siendo visible dentro del contenedor sin
+reiniciarlo. El target único de despliegue es Ubuntu (decisión de proyecto, no
+se contempla Windows).
 
-### Verificación de conexión del SDR
+El `Dockerfile` de `sdr-decoder` compila `mbelib` + `dsd-fme` desde código fuente
+en un stage de build (misma receta validada manualmente en el host, ver
+`sdr-decoder/INVESTIGACION_LRRP.md`), y copia solo el binario final + las
+librerías compartidas imprescindibles (confirmadas con `ldd` sobre el binario
+real) a un stage de runtime más liviano.
+
+### Verificación de conexión del SDR — **RESUELTO**
 
 El SDR queda conectado de forma permanente al servidor físico compartido (Ubuntu).
-Se define un script `check_sdr.sh` que:
+`sdr-decoder/check_sdr.sh` (implementado y probado contra el hardware real):
 
-- Confirma que el dongle esté detectado, y falla con un mensaje claro si no aparece.
-- Verifica que no esté tomado por el driver de TV del kernel
-  (`dvb_usb_rtl28xxu`) y lo libera si hace falta.
-- Usa el identificador fijo por regla `udev` (sección 9) en vez de depender del
-  bus/device USB, que puede variar entre reinicios.
-- Devuelve un código de salida claro (`0` = OK, distinto de `0` = problema),
-  utilizable como chequeo previo en `docker-compose up` o como healthcheck.
+- Confirma que el driver DVB del kernel (`dvb_usb_rtl28xxu`) no esté cargado, y
+  que el blacklist persistente exista en `/etc/modprobe.d/`.
+- Confirma que el symlink estable de la regla `udev` (sección 9) exista y
+  apunte a un nodo con los permisos esperados (`plugdev`, `0660`).
+- Devuelve un código de salida claro (`0` = OK, distinto de `0` = problema).
 
-Pendiente de implementación y validación contra el hardware real.
+**Corre siempre en el HOST, nunca dentro de un contenedor** — el driver DVB y las
+reglas `udev` son configuración del kernel del host; ningún namespace ni flag de
+Docker puede resolver esto desde adentro de un contenedor (confirmado
+explícitamente investigando cómo lo maneja la comunidad de proyectos SDR en
+Docker). Es un prerrequisito manual antes de `docker compose up`, documentado en
+`docs/operacion-sdr.md`, no parte del `Dockerfile` ni de `docker-compose.yml`.
 
 ---
 
@@ -213,27 +228,36 @@ de radio del cuartel (documentación pública, código de producción privado).
 
 ---
 
-## 9. Identificación estable del SDR (udev)
+## 9. Identificación estable del SDR (udev) — **RESUELTO, con la limitación ya cerrada**
 
-Dado que el dongle se utiliza en más de una máquina (estaciones de trabajo de cada
-integrante del equipo, y eventualmente el servidor), se define un identificador
-fijo por regla `udev`, independiente del bus/puerto USB de conexión:
+Regla `udev` implementada en `/etc/udev/rules.d/99-rtlsdr-tracking.rules`,
+independiente del bus/puerto USB de conexión:
 
-- Matcheo por `idVendor`/`idProduct` del dispositivo (RTL2832U: `0bda:2832`).
-- Symlink fijo (ej. `/dev/sdr_bomberos`).
+- Matcheo por `idVendor`/`idProduct` del dispositivo (RTL2832U: `0bda:2832`) **Y**
+  `ATTRS{serial}` (número de serie real que expone este dongle físico:
+  `77771111153705700`, confirmado con `lsusb -v`).
+- Symlink fijo: `/dev/sdr_bomberos`.
 - Permisos de grupo `plugdev`, modo `0660`.
 
-Esto garantiza que el path pasado a Docker (`--device=/dev/sdr_bomberos`) sea
-estable entre reinicios y reconexiones, y simplifica la verificación en
-`check_sdr.sh` (sección 2).
+Esto garantiza que el dispositivo sea identificable de forma estable entre
+reinicios y reconexiones (verificado con `udevadm trigger` re-evaluando la
+regla sin necesitar recompilar nada), y lo verifica `check_sdr.sh` (sección 2).
 
-Limitación conocida: la regla identifica el modelo de chip, no una unidad física
-individual. Si en el futuro se utiliza más de un dongle idéntico en la misma
-máquina, se requiere un criterio adicional (por ejemplo, número de serie USB, si
-el chip lo expone). No aplica a esta versión, que define un único SDR.
+**Limitación conocida cerrada**: la versión anterior de esta regla (genérica de
+`librtlsdr`, matcheando solo por `idVendor`/`idProduct`) no distinguía entre dos
+dongles idénticos en la misma máquina — quedaba anotado acá como limitación
+futura, condicionada a "si el chip expone número de serie". Se confirmó que
+**sí lo expone**, así que la regla nueva ya matchea también por
+`ATTRS{serial}`, identificando la unidad física exacta, no solo el modelo de
+chip. Si en el futuro se reemplaza el dongle físico, hay que actualizar el
+serial en la regla.
 
-Pendiente de implementación y documentación en `docs/setup-sdr.md`, replicable en
-cada estación de trabajo del equipo.
+**Nota de contenedores**: dentro de Docker, `sdr-decoder` NO monta este symlink
+puntual (`/dev/sdr_bomberos`) — monta `/dev/bus/usb` completo (ver sección 2,
+por resiliencia ante replugs) y selecciona el dispositivo por índice/serie de
+`librtlsdr` (`SDR_DEVICE_INDEX`). El symlink del host sigue siendo útil para
+`check_sdr.sh` y para cualquier uso manual del dongle fuera de Docker (ej. el
+procedimiento de recalibración de PPM, ver `docs/operacion-sdr.md`).
 
 ---
 

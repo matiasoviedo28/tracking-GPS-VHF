@@ -95,3 +95,10 @@ docker-compose.override.yml
 # En Docker vive en el volumen nombrado "audio_data" (no en el repo), pero
 # si se corre el backend suelto (sin compose) los clips caen acá.
 backend/storage/
+
+# --- sdr-decoder: bloques temporales de IQ/WAV (live_presence_bridge.py) ---
+# Se borran solos al final de cada bloque (ver finally en procesar_un_bloque)
+# — esto es solo por si el script se corta a mitad de un bloque y deja algo.
+# Los logs crudos por bloque (sdr-decoder/logs/) ya caen bajo la regla
+# genérica "logs/" / "*.log" de más arriba.
+sdr-decoder/bridge_blocks/

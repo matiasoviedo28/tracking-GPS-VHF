@@ -491,6 +491,92 @@ con el panel abierto vean el cambio sin depender de un refresh.
 
 ---
 
+## Estado del SDR
+
+Reporta el estado de salud del hardware SDR (`sdr-decoder`), para poder
+distinguir en el frontend "no hay tráfico de radio ahora mismo" (normal)
+de "algo anda mal con la captura" (requiere revisión física). Ver
+`docs/operacion-sdr.md` para qué significa cada estado y qué hacer en cada
+caso.
+
+### POST /api/sdr-status
+
+`sdr-decoder` postea esto en **cada bloque procesado** (~cada 12-14s, ver
+`sdr-decoder/live_presence_bridge.py`) — es un heartbeat, no solo un aviso
+de cambio. `backend` decide si eso implica un cambio real de estado y solo
+en ese caso lo emite por WebSocket (ver más abajo) — evita mandarle a cada
+cliente conectado un mensaje idéntico cada pocos segundos.
+
+#### Request
+
+`Content-Type: application/json`
+
+| Campo       | Tipo               | Requerido | Descripción                                                                 |
+|-------------|--------------------|-----------|------------------------------------------------------------------------------|
+| `status`    | string             | sí        | Uno de `"desconectado"`, `"sin_datos"`, `"mala_antena"`, `"ok"`.             |
+| `timestamp` | string (ISO 8601)  | sí        | Momento en que se generó este reporte.                                       |
+| `detalle`   | string             | no        | Texto libre con las métricas que llevaron a esta clasificación (ej. `"std=3.07, 0 syncs en 12 bloques"`). |
+
+#### Ejemplo de request
+
+```json
+{
+  "status": "mala_antena",
+  "timestamp": "2026-08-16T21:05:12-03:00",
+  "detalle": "std=3.07 (umbral=1.5), posible antena mal conectada o desconectada"
+}
+```
+
+#### Response — éxito
+
+**`200 OK`** — devuelve el estado persistido (mismo formato que
+`GET /api/sdr-status`).
+
+```json
+{
+  "status": "mala_antena",
+  "timestamp": "2026-08-16T21:05:12-03:00",
+  "detalle": "std=3.07 (umbral=1.5), posible antena mal conectada o desconectada"
+}
+```
+
+#### Response — error de validación
+
+**`422 Unprocessable Entity`** — `status` con un valor fuera de la lista
+permitida, o campos requeridos faltantes.
+
+### GET /api/sdr-status
+
+Devuelve el último estado conocido — para que el frontend cargue el
+estado inicial del indicador al abrir la página, antes de que lleguen
+actualizaciones por WebSocket.
+
+#### Response
+
+**`200 OK`**
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-08-16T21:06:02-03:00",
+  "detalle": "std=0.52 normal, 4 sync(s) DMR en este bloque"
+}
+```
+
+Si todavía no llegó ningún reporte de `sdr-decoder` (por ejemplo, backend
+recién levantado), devuelve un estado neutro `"sin_datos"` en vez de
+`404`, para que el frontend no tenga que tratar esto como un caso de error
+aparte.
+
+### Códigos de estado
+
+| Código | Cuándo |
+|---|---|
+| `200` | Estado persistido/devuelto correctamente. |
+| `422` | (Solo POST) Payload mal formado o `status` inválido. |
+
+---
+
 ## WS /ws/telemetry
 
 WebSocket de solo lectura para el frontend. No requiere mensaje inicial del
@@ -570,12 +656,29 @@ solo cuando el usuario le da play.
 }
 ```
 
+### Mensaje `"type": "sdr_status_update"` (solo cuando el estado del SDR cambia)
+
+```json
+{
+  "type": "sdr_status_update",
+  "status": "mala_antena",
+  "timestamp": "2026-08-16T21:05:12-03:00",
+  "detalle": "std=3.07 (umbral=1.5), posible antena mal conectada o desconectada"
+}
+```
+
+A diferencia de los demás mensajes, este **no** se emite en cada POST —
+`sdr-decoder` postea a `/api/sdr-status` en cada bloque (heartbeat), pero
+`backend` solo emite por WS cuando el `status` efectivamente cambió (ver
+`POST /api/sdr-status` más arriba).
+
 No emite histórico al conectarse — solo eventos nuevos a partir de la
 conexión (para el estado inicial completo, tanto de posición como de
-presencia, usar `GET /api/equipos` al cargar la página, y `GET
-/api/audio-eventos` para la bitácora de audio). Un endpoint de histórico de
-posiciones (para timelapse, sección 6 de ARQUITECTURA.md) queda fuera del
-alcance de esta versión.
+presencia, usar `GET /api/equipos` al cargar la página, `GET
+/api/audio-eventos` para la bitácora de audio, y `GET /api/sdr-status` para
+el estado del SDR). Un endpoint de histórico de posiciones (para
+timelapse, sección 6 de ARQUITECTURA.md) queda fuera del alcance de esta
+versión.
 
 ---
 

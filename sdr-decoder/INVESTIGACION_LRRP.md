@@ -1110,4 +1110,49 @@ Ningún equipo con `ultimo_evento: "gps"` — consistente con el grep de segunda
 1. El punto ciego de auditoría del bridge en vivo (identificado en el re-análisis anterior) está cerrado — pero solo hacia adelante; las corridas de sesiones 12-15 siguen sin poder auditarse retroactivamente.
 2. Sigue abierta la pregunta de fondo: ¿qué dispara una transmisión LRRP/LOCN real en este sistema, si es que ocurre alguna vez? Ninguna sesión hasta ahora (activación de rastreo, fix GPS, emergencia, ni tráfico ambiente prolongado) lo disparó.
 3. Considerar, en una futura sesión, una ventana pasiva mucho más larga (15-30+ min) ahora que el bridge sí guarda todo el texto crudo y detecta los tokens correctos — maximizaría las chances de capturar algo si el intervalo real de un eventual reporte propio es largo (hipótesis 1 de la sesión 14, todavía sin descartar).
-4. El hueco ciego de ~14s por ciclo del bridge (mientras decodifica, no graba) sigue existiendo — no se corrigió en esta sesión por no ser parte del alcance pedido, pero es una limitación real a tener en cuenta para estimar cobertura real de cualquier ventana futura.
+4. ~~El hueco ciego de ~14s por ciclo del bridge (mientras decodifica, no graba) sigue existiendo~~ — **corregido más abajo**: esta cifra de ~14s nunca se midió con precisión y estaba mal. Ver la investigación de "pérdida de audio en el hueco entre bloques", que la mide con exactitud (~2.2-2.9s) a raíz de la bitácora de audio.
+
+---
+
+## Investigación — pérdida de audio en el hueco entre bloques del bridge (bitácora de audio)
+
+**Nota**: no es una sesión de captura de LRRP — es un análisis de solo lectura sobre logs ya generados por la bitácora de audio (feature nueva, ver `docs/API.md`), motivado por un reporte concreto del usuario: hizo un PTT único y continuo contando "del 1 al 20"; en el clip guardado se escuchaba claramente del 1 al 15, pero el tramo final nunca apareció, ni en ese clip ni en ningún clip posterior.
+
+### Corrección de un dato ya documentado: el hueco NO es de ~14s
+
+La entrada anterior de esta misma sección (punto 4 de arriba) afirmaba un hueco de "~14s por ciclo" — ese número **nunca se midió**, era una estimación de sentido común (correspondiéndolo, incorrectamente, con el tiempo de "procesamiento" que imprime el script). Revisando el código: `duracion = time.monotonic() - t0` en `procesar_un_bloque()` mide desde el **inicio de la grabación**, no desde su fin — es decir, el "14.x s de procesamiento" que se imprime por bloque **ya incluye los 12s de grabación**. El tiempo de conversión + decodificación real es solo la diferencia.
+
+### Medición exacta, con datos reales de una transmisión continua
+
+Se coordinó un PTT en tiempo real (usuario contando del 1 al 20), avisándole el instante exacto en que arrancaba a grabarse un bloque nuevo. Con los timestamps de nombre de archivo de los bloques crudos guardados en `logs_sesion16/` (recordar: `BLOCK_SECONDS = 12` exactos, vía `rtl_sdr -n <muestras>`, así que el fin de grabación de cada bloque se puede calcular con precisión sin ambigüedad):
+
+| Bloque | Inicio de grabación | Fin calculado (+12s) | Bloque siguiente arranca | Hueco real |
+|---|---|---|---|---|
+| 54 | 15:56:06.901381 | 15:56:18.901381 | 15:56:21.178937 | **2.278s** |
+| 55 | 15:56:21.178937 | 15:56:33.178937 | 15:56:35.449481 | **2.271s** |
+| 56 | 15:56:35.449481 | 15:56:47.449481 | 15:56:50.288209 | **2.839s** |
+| 57 | 15:56:50.288209 | 15:57:02.288209 | 15:57:04.945025 | **2.657s** |
+
+**El hueco real medido es de ~2.2 a ~2.9 segundos por ciclo** (no ~14s) — consistente en las 4 transiciones medidas, con el bloque 56→57 (el que efectivamente contiene el corte del conteo del usuario) en el extremo superior de ese rango (2.84s).
+
+### El audio guardado confirma el corte exacto en el límite del bloque, no antes
+
+El bloque 56 (`bloque_0056_20260816_155635_449481.log`) contiene voz real y activa (465 líneas `AMBE`, con hex variado y errores bajos — no un decoder trabado) **hasta la última línea del archivo, justo antes de "End of ... .wav"** — es decir, la persona seguía hablando en el instante exacto en que `rtl_sdr` cortó la grabación a los 12.000s (por diseño, `-n <muestras>` fijas). El clip resultante mide 9.3s reales de audio (medido con el módulo `wave`) sobre un bloque de 12s — el resto del bloque fue silencio antes de que arrancara a hablar.
+
+El bloque 57 (`bloque_0057_20260816_155650_288209.log`), que arranca 2.839s después, **también empieza con voz activa desde su primera línea decodificada** (`VC1` inmediatamente después de "Audio In Device") — confirmando que la persona siguió hablando de forma continua durante todo el hueco de 2.839s. Este bloque solo capturó 1.92s reales de audio (87 líneas `AMBE`, el resto del bloque ya en silencio — coincide con que el usuario terminó de contar poco después).
+
+### 🎯 Conclusión — hipótesis confirmada con evidencia directa, con una salvedad honesta sobre la magnitud exacta
+
+**Confirmado, no asumido**: existe un hueco real de **~2.2 a ~2.9 segundos** entre el fin de grabación de un bloque y el inicio del siguiente, durante el cual `rtl_sdr` no está corriendo (el bridge está ocupado convirtiendo y decodificando el bloque anterior). Cualquier audio que caiga en esa ventana se pierde de forma **irrecuperable** — no es un bug de corte de archivo, es una ventana ciega real e inherente al diseño secuencial elegido en la Sesión 12 (grabar → convertir → decodificar → repetir, en vez de grabación continua).
+
+**Salvedad honesta**: el usuario reportó perder aproximadamente el tramo "16 al 20" (~5 segundos a un ritmo de conteo natural). El hueco medido con precisión (2.839s en la transición relevante) explica una parte real y confirmada de esa pérdida, pero no necesariamente el 100% — el bloque 57 posterior al hueco solo decodificó 1.92s de sus 12s grabados (el resto quedó en silencio o en errores de decodificación no listados como voz), lo que sugiere que además del hueco entre bloques, hay pérdida adicional dentro del propio bloque por calidad marginal de señal/demodulación (mismo problema de recepción documentado en sesiones anteriores). **No se puede afirmar que el hueco por sí solo explique exactamente 5 segundos** — sí se puede afirmar, con evidencia directa, que el hueco es real, mide ~2.2-2.9s, y es una causa confirmada (aunque quizás no la única) de la pérdida reportada.
+
+### Cómo se resolvería (propuesta, sin implementar)
+
+El diseño actual es **secuencial**: grabar 12s → convertir → decodificar → repetir. El hueco es el tiempo de conversión+decodificación, durante el cual nadie está escuchando el aire. La solución de fondo es hacer la grabación **continua e independiente** del procesamiento:
+
+- Correr `rtl_sdr` en un proceso de background **persistente**, escribiendo un stream continuo (o archivos consecutivos sin huecos, ej. con `rtl_sdr` en modo de captura continua a un pipe, o encadenando grabaciones de forma que la siguiente arranque antes de que termine de procesarse la anterior).
+- Procesar cada bloque (conversión + `dsd-fme`) en un **hilo o proceso separado**, en paralelo con la grabación del bloque siguiente, en vez de bloquear el loop principal.
+- Esto requiere manejar la sincronización entre "grabación en curso" y "bloques ya grabados pendientes de procesar" (una cola simple alcanzaría, dado el volumen bajo de bloques por minuto).
+
+No se implementa en esta investigación (era de solo lectura/análisis) — queda como mejora concreta y ya justificada con datos reales para una futura sesión, si se decide que vale la pena la complejidad adicional frente al enfoque secuencial actual (que ya viene priorizando simplicidad sobre cobertura completa, ver Sesión 12).

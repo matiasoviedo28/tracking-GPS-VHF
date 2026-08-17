@@ -115,3 +115,26 @@ class AudioEventoOut(BaseModel):
     duracion_seg: float
     escuchado: bool
     ubicacion: str | None = None
+
+
+# Estado del hardware SDR, reportado por sdr-decoder en cada bloque
+# procesado (ver docs/operacion-sdr.md para qué significa cada uno y qué
+# hacer en cada caso):
+#   - desconectado: rtl_sdr no pudo abrir el dispositivo.
+#   - mala_antena: std de las muestras IQ por encima del umbral configurado.
+#   - sin_datos: conexión ok pero sin ningún sync DMR sostenido — puede ser
+#     silencio normal o antena floja, no se puede distinguir solo con esto.
+#   - ok: hubo sync DMR reciente (cualquier Color Code).
+EstadoSdr = Literal["desconectado", "sin_datos", "mala_antena", "ok"]
+
+
+class SdrStatusIn(BaseModel):
+    status: EstadoSdr
+    timestamp: datetime
+    detalle: str | None = None
+
+
+class SdrStatusOut(BaseModel):
+    status: EstadoSdr
+    timestamp: datetime
+    detalle: str | None = None

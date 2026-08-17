@@ -76,3 +76,17 @@ class EventoAudio(Base):
     # aún. Formato sin definir (podría terminar siendo lat/lon separados o
     # un FK a Posicion) — placeholder simple a propósito.
     ubicacion = Column(String, nullable=True)
+
+
+class EstadoSDR(Base):
+    """Última lectura conocida del estado del hardware SDR (ver
+    docs/operacion-sdr.md) — una sola fila, no historial: el bridge postea
+    esto en cada bloque (~cada 12-14s) como heartbeat, y solo interesa el
+    valor más reciente, no acumular una fila por bloque para siempre."""
+
+    __tablename__ = "estado_sdr"
+
+    id = Column(Integer, primary_key=True)
+    status = Column(String, nullable=False)  # desconectado | sin_datos | mala_antena | ok
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    detalle = Column(String, nullable=True)
