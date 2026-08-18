@@ -15,6 +15,12 @@ reconoce — no dispara ninguna transmisión nueva:
   4. `bloque_0019` — fragmentos sueltos sin consolidar, coordenada nueva
      (radio_id 1 → 1001). Debe reconstruir al menos parcialmente,
      marcando cuántos bloques faltaron.
+  5. `bloque_0473/0475/0498/0528` (sesión de monitoreo en vivo del
+     2026-08-18) — beacon GPS automático "APRS" del Baofeng, formato NMEA
+     $GPRMC sobre SAP 03 [UDP Comp] + Unconfirmed Delivery (radio_id
+     1 → 456, cada ~30s). Deben parsear lat/lon/velocidad/rumbo/hora, Y
+     tratarse como 4 eventos DISTINTOS pese a compartir Source/Target
+     (dedup por timestamp embebido en el NMEA, no por Source+Target).
 
 Uso (dentro del contenedor sdr-decoder, donde vive el volumen sdr_logs):
     python3 test_dmr_texto_plano_parser.py [directorio_de_logs]
@@ -150,6 +156,68 @@ def test_fragmentos_sueltos_coordenada_nueva(logs_dir: Path) -> bool:
     return ok
 
 
+def test_nmea_beacon_reales(logs_dir: Path) -> bool:
+    print("\n=== Caso 4: beacon GPS automático NMEA (4 beacons reales, 2026-08-18) ===")
+    # (nombre_archivo, hora_esperada_hhmmss, lat_esperada, lon_esperada, vel_nudos_esperada, rumbo_esperado)
+    casos = [
+        ("bloque_0473_20260818_004626_153403.log", "004627", -32.340215, -65.024674, 0.00, 258.69),
+        ("bloque_0475_20260818_004654_808856.log", "004655", -32.340218, -65.024662, 0.00, 258.69),
+        ("bloque_0498_20260818_005223_900421.log", "005222", -32.340208, -65.024755, 0.86, 282.68),
+        ("bloque_0528_20260818_005932_837888.log", "005942", -32.340260, -65.024721, 0.55, 99.28),
+    ]
+    for nombre, *_ in casos:
+        if not (logs_dir / nombre).exists():
+            _fallo(f"no se encontró el bloque de referencia {nombre}")
+            return False
+
+    detector = DetectorMensajesDMR()
+    beacons = []
+    for nombre, hora_esperada, lat_esp, lon_esp, vel_esp, rumbo_esp in casos:
+        hallazgos = detector.procesar_bloque((logs_dir / nombre).read_text())
+        encontrados = [h for h in hallazgos if h["mecanismo"] == "nmea_beacon"]
+        if not encontrados:
+            _fallo(f"{nombre}: no se encontró ningún beacon nmea_beacon")
+            return False
+        h = encontrados[0]
+        print(
+            f"  {nombre}: radio_id={h['radio_id']} contacto={h['radio_id_contacto']} "
+            f"lat={h['lat']} lon={h['lon']} vel_kmh={h['velocidad_kmh']} rumbo={h['rumbo']} "
+            f"ts_gps={h['timestamp_gps_iso']} crc_error={h['crc_error']} duplicado={h.get('duplicado')}"
+        )
+        ok_radio = h["radio_id"] == "1" and h["radio_id_contacto"] == "456"
+        ok_hora = h["timestamp_gps_iso"] is not None and hora_esperada[:2] + ":" + hora_esperada[2:4] + ":" + hora_esperada[4:] in h["timestamp_gps_iso"]
+        ok_lat = h["lat"] is not None and abs(h["lat"] - lat_esp) <= 0.001
+        ok_lon = h["lon"] is not None and abs(h["lon"] - lon_esp) <= 0.001
+        ok_vel = h["velocidad_kmh"] is not None and abs(h["velocidad_kmh"] - round(vel_esp * 1.852, 3)) <= 0.01
+        ok_rumbo = h["rumbo"] is not None and abs(h["rumbo"] - rumbo_esp) <= 0.01
+        ok_completo = h["completo"] is True
+        if not all([ok_radio, ok_hora, ok_lat, ok_lon, ok_vel, ok_rumbo, ok_completo]):
+            _fallo(
+                f"{nombre}: radio={ok_radio} hora={ok_hora} lat={ok_lat} lon={ok_lon} "
+                f"vel={ok_vel} rumbo={ok_rumbo} completo={ok_completo}"
+            )
+            return False
+        beacons.append(h)
+
+    # El punto central de la Etapa 2: 4 beacons reales, mismo Source=1 /
+    # Target=456, NO deben deduplicarse entre sí — cada uno es un evento
+    # de tracking legítimo y distinto (hora/posición cambian de verdad).
+    todos_no_duplicados = all(h["duplicado"] is False for h in beacons)
+    print(f"los 4 beacons se trataron como eventos DISTINTOS (ninguno marcado duplicado): {todos_no_duplicados}")
+
+    # Checksum NMEA: se confirmó (fuera de este test, ver INVESTIGACION_LRRP.md)
+    # que el Baofeng manda un checksum que NO valida contra la fórmula
+    # estándar en NINGUNO de los 4 casos reales — comportamiento sistemático
+    # del firmware, no corrupción de captura. Se verifica que el parser lo
+    # marca como tal (crc_error=True) SIN por eso descartar los datos.
+    todos_marcados_crc_error = all(h["crc_error"] is True for h in beacons)
+    print(f"los 4 beacons quedaron marcados crc_error=True (checksum no estándar, dato igual parseado): {todos_marcados_crc_error}")
+
+    ok = todos_no_duplicados and todos_marcados_crc_error
+    print("PASS" if ok else "FALLO: algo no se comportó como se esperaba con los beacons NMEA")
+    return ok
+
+
 def main() -> int:
     logs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent / "logs"
 
@@ -157,10 +225,14 @@ def main() -> int:
         test_icmp_bounce_hito(logs_dir),
         test_udp_directo_test123(logs_dir),
         test_fragmentos_sueltos_coordenada_nueva(logs_dir),
+        test_nmea_beacon_reales(logs_dir),
     ]
 
     print("\n=== Resumen ===")
-    nombres = ["rebote ICMP (hito)", "UDP directo (Test123)", "fragmentos sueltos (coordenada nueva)"]
+    nombres = [
+        "rebote ICMP (hito)", "UDP directo (Test123)",
+        "fragmentos sueltos (coordenada nueva)", "beacon NMEA automático (4 reales)",
+    ]
     for nombre, ok in zip(nombres, resultados):
         print(f"  {'PASS' if ok else 'FALLO'} — {nombre}")
 

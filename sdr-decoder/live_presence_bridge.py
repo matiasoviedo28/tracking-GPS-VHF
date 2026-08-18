@@ -220,14 +220,15 @@ def enviar_presencia(radio_id: str, evento: str) -> None:
         print(f"  [{etiqueta}] evento={evento} -> NO SE PUDO CONECTAR AL BACKEND: {exc.reason}", flush=True)
 
 
-def enviar_telemetry(radio_id: str, lat: float, lon: float, velocidad_kmh, timestamp_iso: str) -> None:
+def enviar_telemetry(radio_id: str, lat: float, lon: float, velocidad_kmh, timestamp_iso: str, rumbo=None) -> None:
     """POST a /api/telemetry (ver docs/API.md) — usado por el detector de
     mensajería DMR en texto plano (`dmr_texto_plano_parser.py`) cuando el
     contenido decodificado tiene forma de coordenada. A diferencia de
     /api/presence, `radio_alias` es un campo requerido por el contrato —
     si no hay uno cargado en ALIAS_CONOCIDOS, se manda el propio radio_id
     como alias (mismo comportamiento default que ya aplica el backend en
-    /api/presence)."""
+    /api/presence). `rumbo` solo lo trae el mecanismo nmea_beacon (viene
+    del propio $GPRMC) — el resto de los mecanismos manda None."""
     alias = ALIAS_CONOCIDOS.get(radio_id, radio_id)
     payload = {
         "radio_id": radio_id,
@@ -238,6 +239,8 @@ def enviar_telemetry(radio_id: str, lat: float, lon: float, velocidad_kmh, times
     }
     if velocidad_kmh is not None:
         payload["velocidad"] = velocidad_kmh
+    if rumbo is not None:
+        payload["rumbo"] = rumbo
 
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -600,6 +603,17 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> dict:
                 ultimo_post[radio_id] = ahora
                 enviar_presencia(radio_id, "gps")
 
+        # radio_id -> evento de presencia a postear ("aprs" para el beacon
+        # NMEA automático, "gps" para los otros 3 mecanismos con coordenada
+        # completa) — se arma acá para (a) postearlo más abajo y (b) tener
+        # prioridad sobre una detección de "voz" genérica del mismo bloque
+        # para el mismo radio_id (ver parsear_bloque/SRC_VOZ_RE): el burst
+        # es de datos, no de voz real, aunque la investigación confirmó que
+        # en la práctica esas dos regex casi nunca coinciden en el mismo
+        # bloque (0 colisiones en 98 bloques reales revisados) — esto es
+        # una salvaguarda para el caso teórico, no el fix del bug real.
+        evento_gps_por_radio: dict[str, str] = {}
+
         hallazgos_dmr = DETECTOR_MENSAJES_DMR.procesar_bloque(salida)
         for hallazgo in hallazgos_dmr:
             if hallazgo["duplicado"]:
@@ -631,16 +645,23 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> dict:
             frags = ""
             if hallazgo["bloques_totales"] is not None:
                 frags = f" bloques={hallazgo['bloques_capturados']}/{hallazgo['bloques_totales']}"
+            # nmea_beacon trae su propia hora de fix (la real del GPS) —
+            # se usa esa en vez de la del momento en que se escuchó el
+            # bloque. El resto de los mecanismos no tiene hora propia, se
+            # usa la de captura del bloque como siempre.
+            timestamp_a_postear = hallazgo.get("timestamp_gps_iso") or bloque_inicio_iso
             print("\n" + "#" * 70, flush=True)
             print(f"### 🎯 GPS (texto plano DMR, mecanismo={hallazgo['mecanismo']}) — BLOQUE {indice} 🎯", flush=True)
             print("#" * 70, flush=True)
             print(
                 f"### radio_id={hallazgo['radio_id']} (vía contacto {hallazgo['radio_id_contacto']}) "
-                f"lat={hallazgo['lat']} lon={hallazgo['lon']} vel={hallazgo['velocidad_kmh']}{frags}",
+                f"lat={hallazgo['lat']} lon={hallazgo['lon']} vel={hallazgo['velocidad_kmh']} "
+                f"rumbo={hallazgo['rumbo']}{frags}",
                 flush=True,
             )
             print(
-                f"### reconstruido_cruzando_bloques={hallazgo['reconstruido_cruzando_bloques']} "
+                f"### timestamp_gps={hallazgo['timestamp_gps_iso']} "
+                f"reconstruido_cruzando_bloques={hallazgo['reconstruido_cruzando_bloques']} "
                 f"crc_error_residual={hallazgo['crc_error']}",
                 flush=True,
             )
@@ -648,8 +669,36 @@ def procesar_un_bloque(indice: int, ultimo_post: dict) -> dict:
             print("#" * 70 + "\n", flush=True)
             enviar_telemetry(
                 hallazgo["radio_id"], hallazgo["lat"], hallazgo["lon"],
-                hallazgo["velocidad_kmh"], bloque_inicio_iso,
+                hallazgo["velocidad_kmh"], timestamp_a_postear, rumbo=hallazgo["rumbo"],
             )
+            evento_gps_por_radio[hallazgo["radio_id"]] = (
+                "aprs" if hallazgo["mecanismo"] == "nmea_beacon" else "gps"
+            )
+
+        if evento_gps_por_radio:
+            # Prioridad del hallazgo GPS/APRS sobre una detección de voz
+            # genérica del mismo radio_id en este bloque (ver comentario
+            # donde se arma evento_gps_por_radio, más arriba).
+            descartados = [
+                (radio_id, evento) for radio_id, evento in eventos
+                if evento in ("voz", "emergencia") and radio_id in evento_gps_por_radio
+            ]
+            if descartados:
+                for radio_id, evento in descartados:
+                    print(
+                        f"  [{radio_id}] evento={evento} descartado — el mismo radio_id tuvo un "
+                        f"hallazgo GPS/APRS en este bloque, tiene prioridad",
+                        flush=True,
+                    )
+                eventos = [e for e in eventos if e not in descartados]
+
+            for radio_id, evento_gps in evento_gps_por_radio.items():
+                ahora = time.monotonic()
+                if ahora - ultimo_post.get(radio_id, 0) < RATE_LIMIT_SEG:
+                    print(f"  [{radio_id}] evento={evento_gps} -> rate-limited, no se re-postea", flush=True)
+                    continue
+                ultimo_post[radio_id] = ahora
+                enviar_presencia(radio_id, evento_gps)
 
         if not eventos:
             estado = "sync CC=01 pero sin evento reconocido" if hubo_sync else "sin actividad"

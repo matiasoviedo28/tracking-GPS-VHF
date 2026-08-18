@@ -1504,3 +1504,132 @@ confiable de LRRP, y no comunicar el hallazgo de mensajería de texto como
 una vulnerabilidad de este proyecto — es una propiedad del
 hardware/firmware de terceros que este sistema puede observar por estar
 escuchando el aire.
+
+---
+
+## 🎯 HITO — Primer flujo de GPS automático y periódico funcionando de punta a punta
+
+**Contexto**: todo lo anterior en este documento —LRRP, el rebote ICMP,
+"Test123", los fragmentos sueltos— fueron capturas puntuales de mensajes
+mandados a mano, una sola vez. El 2026-08-18 el usuario activó la función
+**APRS** del Baofeng UV-32, que manda su posición **sola, cada 30
+segundos, sin que nadie apriete nada**:
+
+```
+APRS: On
+Upload ID: 456
+Upload Type: Private Call
+Set Interval: 30 segundos
+Upload Beacon: GPS Beacon
+```
+
+### El formato es otro, y es un estándar de verdad
+
+A diferencia de los cuatro hallazgos anteriores (texto propio UTF-16LE
+"Lat:"/"Long:"/"Speed:"), este beacon usa:
+
+- Header DMR `SAP 03 [UDP Comp]` (IP comprimido nativo de DMR, no un
+  paquete IPv4 normal) + `Unconfirmed Delivery` (sin ACK, esperable para
+  un beacon periódico que no necesita confirmación).
+- Contenido: una sentencia **NMEA-0183 `$GPRMC` estándar**, la misma que
+  usa cualquier receptor GPS del mundo — no un formato propio de este
+  proyecto ni del Baofeng. Ejemplo real:
+  ```
+  $GPRMC,004627.000,A,3220.41291,S,06501.48043,W,0.00,258.69,180826,,,A*78
+  ```
+  → 00:46:27 UTC, fix válido (A), lat 32°20.41291'S, lon 065°01.48043'W
+  (**-32.340215, -65.024674**), velocidad 0.00 nudos, rumbo 258.69°,
+  fecha 18/08/26.
+
+**Dato curioso, no un bug nuestro**: el checksum que manda el Baofeng al
+final de la sentencia (`*78`) **no valida** contra la fórmula estándar
+NMEA (XOR de los bytes entre `$` y `*`) — confirmado en los 4 beacons de
+referencia usados en el test, y verificado que el algoritmo en sí está
+bien comparándolo contra un ejemplo de tutorial NMEA con checksum
+conocido. Es un comportamiento sistemático del firmware del handy, no
+corrupción de la captura — el contenido (lat/lon/hora) es consistente y
+coherente en las 4 muestras, así que se parsea igual, marcado
+`crc_error=True` (mismo criterio de "no descartar silenciosamente" del
+resto del módulo).
+
+### Validación de intervalo — la más limpia de todo el proyecto
+
+A diferencia del ARS de Base Guardia (intervalo medido sin saber el valor
+real de antemano), acá el usuario configuró **30s** explícitamente. Dos
+ventanas de monitoreo independientes, midiendo contra los timestamps de
+archivo:
+
+| Ventana | Beacons detectados (evidencia manual, antes de automatizar) | Intervalo medido | Tasa de éxito |
+|---|---|---|---|
+| Monitoreo inicial (17:10 min) | 29 | 28-29s (prom. 28.6s) | 82.1% |
+| QA en vivo post-integración (9:46 min) | 17 | 28-29s | 82.8% |
+
+Las dos ventanas coinciden en dos cosas: el intervalo real es
+**prácticamente 30s** (la diferencia de 1-2s es margen de redondeo a
+segundo entero de los timestamps de archivo), y la tasa de éxito
+converge en **~82%** — consistente entre corridas, lo que sugiere que no
+es una casualidad puntual sino una característica estable de la
+recepción actual (antena/ubicación), no del beacon en sí (que sale cada
+30s puntual del lado del radio).
+
+### Implementación: 4to mecanismo, "nmea_beacon"
+
+`dmr_texto_plano_parser.py` reconoce ahora este 4to camino
+(`mecanismo="nmea_beacon"`), reusando la función central
+`interpretar_payload`... en realidad NO la reusa directamente (ese
+formato es UTF-16LE con header propio de 8 bytes, este es ASCII/NMEA sin
+ese header) — se agregó un parser paralelo (`_parsear_beacon_nmea`,
+`_parsear_gprmc`) diseñado para extenderse a futuro si aparecen otras
+sentencias NMEA (`$GPGGA`, etc. — ninguna implementada todavía por falta
+de evidencia real de que el Baofeng las mande). Lo que sí se reusó: la
+recolección de bloques sueltos de una sección "Data Header" (refactorizada
+a `_recolectar_bloques_de_seccion`, compartida con
+`reconstruir_fragmentos_sueltos`) y la arquitectura general del detector
+(dedup, integración al bridge).
+
+**Deduplicación — el caso que había que hacer bien**: acá NO aplica la
+regla de "mismo Source+Target en ventana cercana = duplicado" que usan
+los otros tres mecanismos. Cada beacon de 30s es un evento de tracking
+legítimo y distinto (la posición y la hora cambian de verdad cada vez),
+aunque comparta Source=1/Target=456 siempre. La clave de dedup para este
+mecanismo usa el **timestamp embebido en el propio NMEA**, no solo
+Source+Target — así 29 beacons reales generan 29 eventos distintos, y
+solo se deduplica si literalmente se reprocesa el mismo bloque con el
+mismo timestamp GPS exacto. Validado con un test que corre 4 beacons
+reales consecutivos y confirma que ninguno se marca `duplicado`.
+
+`rumbo` se agregó como parámetro de `enviar_telemetry` (el campo ya
+existía en el contrato de `/api/telemetry`, no hizo falta tocar el
+backend). El timestamp posteado es el del **fix GPS real** (parseado del
+NMEA), no el del momento en que el bridge escuchó el bloque — para tener
+la hora real del movimiento, no la de la escucha.
+
+### QA en vivo — primera vez que se ve un equipo real en el mapa
+
+Con el Baofeng todavía transmitiendo, se validó en vivo (no solo contra
+logs guardados):
+- 17 beacons detectados y posteados con éxito (`POST 200`) en ~9:46 min,
+  ningún error, ningún falso duplicado.
+- `GET /api/equipos` confirmado actualizándose solo entre pedidos
+  sucesivos (posición y hora cambiando cada ~28-29s, sin intervención).
+- Captura de pantalla del frontend (Playwright headless) mostrando el
+  marcador del Baofeng (`radio_id 1`) en el mapa real, con popup
+  mostrando posición, hora (la del fix GPS, no la de captura), velocidad
+  y **rumbo** — la primera vez en todo el proyecto que se ve un equipo
+  real trackeado en el mapa, no solo en el panel de equipos ni en un
+  posteo manual de demo.
+
+Esto es distinto a todos los hallazgos anteriores (que eran capturas
+puntuales de un envío manual): es el primer flujo de **GPS automático y
+periódico** funcionando end-to-end, sin coordinación humana en el
+momento, igual de "desatendido" que el hito de containerización pero
+esta vez con datos de posición reales llegando al mapa.
+
+### Sigue siendo forense, y sigue dependiendo de la señal
+
+El mecanismo en sí no es oportunista como (a)/(b) — es tráfico periódico
+normal, no depende de ningún rechazo de red. El único riesgo real es la
+calidad de señal (mismo problema que (c)): ~18% de los beacons se pierden
+en las condiciones actuales de recepción, y no hay forma de saber desde
+acá si el radio dejó de transmitir o si simplemente no se decodificó ese
+bloque en particular.

@@ -16,6 +16,8 @@ const NOMBRES_EVENTO = {
   voz: "Voz",
   emergencia: "Emergencia",
   ars: "ARS (registro)",
+  gps: "GPS (dato)",
+  aprs: "GPS automático (APRS)",
 };
 
 // Íconos disponibles para el mapa (ver IconoEquipo en backend/app/schemas.py)

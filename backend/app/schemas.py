@@ -48,7 +48,13 @@ class PosicionBroadcast(BaseModel):
 # postea cuando dsd-fme reconoce un token real de LRRP/LOCN, no una
 # posición en sí. La posición decodificada de verdad seguiría yendo por
 # POST /api/telemetry, con LRRP todavía en investigación por separado).
-EventoPresencia = Literal["voz", "emergencia", "ars", "gps"]
+# "aprs": beacon GPS automático y periódico detectado por el mecanismo
+# nmea_beacon de dmr_texto_plano_parser.py (ver INVESTIGACION_LRRP.md,
+# hito del beacon automático) — a diferencia de "gps" (un hallazgo de
+# posición puntual dentro de un burst de datos, mecanismos icmp_bounce/
+# udp_directo/fragmentos_reconstruidos), "aprs" es específicamente el
+# formato NMEA estándar mandado solo por la función APRS del handy.
+EventoPresencia = Literal["voz", "emergencia", "ars", "gps", "aprs"]
 
 
 class PresenceIn(BaseModel):

@@ -162,6 +162,38 @@ el documento, no el tamaño real del archivo.
   físico o dos unidades distintas** — pendiente de una prueba que
   identifique a `529385` sin error de CRC para poder compararlo.
 
+### 🎯 Beacon GPS automático — el hito real de tracking del proyecto
+Configuración activada por el usuario en el handy:
+```
+APRS: On
+Upload ID: 456
+Upload Type: Private Call
+Set Interval: 30 segundos
+Upload Beacon: GPS Beacon
+```
+Con esto el UV-32 manda su posición **solo, cada ~30s, sin que nadie
+apriete "Send"** — a diferencia de todos los hallazgos anteriores
+(capturas puntuales de un envío manual). El formato es distinto además:
+no el texto propio UTF-16LE de esta sección, sino una sentencia **NMEA
+estándar `$GPRMC`** (header DMR `SAP 03 [UDP Comp]` + `Unconfirmed
+Delivery`) — el mismo formato universal de cualquier receptor GPS, más
+simple que el propietario de los otros mecanismos. Detección
+automatizada como 4to mecanismo (`nmea_beacon`) en
+`dmr_texto_plano_parser.py`, integrado a `live_presence_bridge.py`.
+
+Validado en vivo con el handy transmitiendo (no solo contra logs
+guardados): 17 beacons detectados y posteados en ~9:46 min sin errores
+(tasa de éxito 82.8%, consistente con el 82.1% de una ventana de
+monitoreo anterior de 17:10 min con 29 beacons), `GET /api/equipos`
+actualizándose solo entre pedidos sucesivos, y **primera captura de
+pantalla del mapa mostrando un equipo real trackeado** (`radio_id 1`,
+posición + hora del fix GPS real + velocidad + rumbo en el popup).
+Detalle completo, incluyendo el dato de que el checksum NMEA del handy
+no valida contra la fórmula estándar (comportamiento del firmware, no
+corrupción), en `../sdr-decoder/INVESTIGACION_LRRP.md`, sección "🎯 HITO
+— Primer flujo de GPS automático y periódico funcionando de punta a
+punta".
+
 ### Nota — `radio_id 1007` no es un equipo del sistema
 `1007` apareció únicamente como **destinatario** de los paquetes de datos
 descriptos arriba — nunca transmitió nada por sí mismo (ni voz, ni ARS, ni

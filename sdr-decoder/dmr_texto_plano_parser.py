@@ -12,22 +12,31 @@ pero se confirmó que no es exclusivo de GPS ni de ese modelo con el
 hallazgo "Test123" (mensaje de texto Motorola→Baofeng, sección "🎯
 HALLAZGO — El mismo canal expone mensajes de texto, no solo GPS").
 
-Reconoce TRES formas de encontrar el mismo tipo de contenido (texto
-UTF-16LE, con o sin forma de coordenada Lat/Long/Speed):
+Reconoce CUATRO formas de encontrar contenido de posición/texto:
 
   (a) "icmp_bounce" — el paquete UDP original rebota como ICMP
       "Destination Unreachable — Port Unreachable" porque el destinatario
       no tiene el puerto escuchando (mecanismo del hito de GPS,
       radio_id 1 → 1007). `dsd-fme` sí llega a consolidar el paquete en
-      un resumen "Multi Block PDU Message".
+      un resumen "Multi Block PDU Message". Contenido: texto UTF-16LE
+      ("Lat:"/"Long:"/"Speed:").
   (b) "udp_directo" — el paquete UDP llega derecho, sin rebotar, porque
       el destinatario SÍ tiene algo escuchando y responde (mecanismo del
       hallazgo "Test123", radio_id 1001 → 1). También consolidado por
-      `dsd-fme`.
+      `dsd-fme`. Mismo formato de texto que (a).
   (c) "fragmentos_reconstruidos" — con señal marginal, `dsd-fme` a veces
       NO llega a consolidar el resumen y solo deja los bloques sueltos
       del PDU en el log. Este módulo los recolecta y concatena a mano
-      (ver `reconstruir_fragmentos_sueltos`).
+      (ver `reconstruir_fragmentos_sueltos`). Mismo formato de texto que
+      (a)/(b), header `SAP 04 [IP Based]` + `Confirmed Delivery`.
+  (d) "nmea_beacon" — NUEVO: el beacon GPS automático y periódico del
+      Baofeng UV-32 (función "APRS" del handy, no el "Send" manual de
+      (a)/(b)/(c)). Usa un header DMR completamente distinto —
+      `SAP 03 [UDP Comp]` (IP comprimido nativo de DMR, no un paquete
+      IPv4 normal) + `Unconfirmed Delivery` — y el contenido no es el
+      texto UTF-16LE propio de este proyecto sino una sentencia **NMEA
+      estándar `$GPRMC`** en ASCII plano, el mismo formato que usa
+      cualquier receptor GPS. Ver `extraer_beacons_nmea`.
 
 ⚠️ Sigue siendo forense y oportunista, no un protocolo soportado:
   - (a) depende de que el destinatario rechace el paquete.
@@ -46,6 +55,9 @@ UTF-16LE, con o sin forma de coordenada Lat/Long/Speed):
     enteros (nunca se imprimen si no sincronizan) — eso se refleja en
     `bloques_capturados` vs `bloques_totales`, sin asumir dónde cayó el
     hueco.
+  - (d) no depende de rebote ni de nada excepcional — es tráfico
+    periódico normal (cada ~30s, configurable en el handy). El único
+    riesgo real es la calidad de señal (mismo problema que (c)).
 """
 
 from __future__ import annotations
@@ -165,6 +177,8 @@ def interpretar_payload(payload: bytes) -> dict:
         "lat": lat,
         "lon": lon,
         "velocidad_kmh": velocidad_kmh,
+        "rumbo": None,  # este formato (a/b/c) no trae rumbo, solo lo da (d) nmea_beacon
+        "timestamp_gps_iso": None,  # idem — solo (d) trae hora propia embebida
         "campos": campos,
         "texto_crudo": texto,
         "completo": lat is not None and lon is not None,
@@ -388,6 +402,36 @@ def _bytes_desde_pdu_payload(linea: str) -> bytes:
     return bytes(int(h, 16) for h in re.findall(r"\[([0-9A-Fa-f]{2})\]", m.group(1)))
 
 
+def _recolectar_bloques_de_seccion(lineas: list[str], inicio_header: int) -> tuple[list[bytes], bool, int]:
+    """A partir del índice de una línea "Data Header", recolecta los
+    bytes de los bloques de continuación que dsd-fme imprime sueltos
+    (descartando el primero, que es el propio framing DMR — SAP/FMF/
+    BLOCKS/etc, ya representado en texto por dsd-fme en la línea de
+    arriba, no el payload IP/UDP embebido) hasta el terminador o el
+    próximo header/preamble. Devuelve (bloques_de_bytes,
+    hubo_resumen_consolidado, índice_donde_seguir escaneando). Compartido
+    entre `reconstruir_fragmentos_sueltos` (c) y `extraer_beacons_nmea`
+    (d) — misma mecánica de bajo nivel, cada una decide qué hacer con el
+    resultado."""
+    j = inicio_header + 1
+    payload_lineas = []
+    consolidado = False
+    while j < len(lineas):
+        linea = lineas[j].strip()
+        if TERMINATOR_RE.search(linea):
+            j += 1
+            break
+        if MULTIBLOCK_HEADER_RE.match(linea):
+            consolidado = True
+        if j > inicio_header + 1 and LIMITE_SECCION_RE.match(linea):
+            break
+        if PDU_PAYLOAD_RE.search(linea):
+            payload_lineas.append(linea)
+        j += 1
+    bloques = [_bytes_desde_pdu_payload(l) for l in payload_lineas[1:]]
+    return bloques, consolidado, j
+
+
 def reconstruir_fragmentos_sueltos(texto: str) -> list[dict]:
     """Busca secciones "Slot 1 Data Header - Indiv - Confirmed Delivery"
     que NO tengan un resumen "Multi Block PDU Message" consolidado antes
@@ -424,34 +468,17 @@ def reconstruir_fragmentos_sueltos(texto: str) -> list[dict]:
             if mb:
                 bloques_totales = int(mb.group(1))
 
-        # recolectar líneas hasta el próximo header/preamble o terminador
-        j = i + 1
-        payload_lineas = []
-        consolidado_presente = False
-        while j < len(lineas):
-            linea = lineas[j].strip()
-            if TERMINATOR_RE.search(linea):
-                j += 1
-                break
-            if MULTIBLOCK_HEADER_RE.match(linea):
-                consolidado_presente = True
-            if j > i + 1 and LIMITE_SECCION_RE.match(linea):
-                break
-            if PDU_PAYLOAD_RE.search(linea):
-                payload_lineas.append(linea)
-            j += 1
+        bloques, consolidado_presente, j = _recolectar_bloques_de_seccion(lineas, i)
         i = j
 
         if consolidado_presente:
             # dsd-fme ya lo consolidó — lo toma extraer_candidatos(), acá
             # se ignora para no detectarlo dos veces desde el origen.
             continue
-        if len(payload_lineas) < 2:
+        if not bloques:
             continue  # ni el bloque de framing quedó, no hay nada que armar
 
-        # descartar el primer bloque (framing DMR, no payload IP/UDP)
-        bloques_capturados = payload_lineas[1:]
-        crudo = b"".join(_bytes_desde_pdu_payload(l) for l in bloques_capturados)
+        crudo = b"".join(bloques)
         if not crudo:
             continue
 
@@ -463,9 +490,186 @@ def reconstruir_fragmentos_sueltos(texto: str) -> list[dict]:
             "crc_error": True,  # por definición, esta sección no se consolidó limpia
             "reconstruido_cruzando_bloques": False,
             "bloques_totales": bloques_totales,
-            "bloques_capturados": len(bloques_capturados),
+            "bloques_capturados": len(bloques),
         })
         hallazgos.append(resultado)
+
+    return hallazgos
+
+
+# --- Etapa 1 (nueva, mecanismo d): beacon GPS automático "APRS" del
+# Baofeng, formato NMEA sobre header SAP 03 [UDP Comp] + Unconfirmed
+# Delivery — ver INVESTIGACION_LRRP.md, sección del beacon automático ---
+
+DATA_HEADER_NMEA_RE = re.compile(
+    r"Data Header - Indiv - Unconfirmed Delivery.*Source: (\d+) Target: (\d+)"
+)
+SAP03_RE = re.compile(r"SAP 03 \[UDP Comp\]")
+# Cualquier sentencia NMEA: "$" + 5 letras mayúsculas (talker+tipo, ej.
+# GPRMC) + campos separados por coma + "*" + checksum hex de 2 dígitos.
+NMEA_SENTENCE_RE = re.compile(rb"\$([A-Z]{5}),([\x20-\x7e]*?)\*([0-9A-Fa-f]{2})")
+
+
+def _checksum_nmea(cuerpo: str) -> int:
+    """XOR de todos los bytes entre '$' y '*' (sin incluirlos) — checksum
+    estándar NMEA-0183."""
+    chk = 0
+    for c in cuerpo:
+        chk ^= ord(c)
+    return chk
+
+
+def _parsear_gprmc(campos: list[str]) -> dict | None:
+    """Sentencia $GPRMC ya separada por coma (sin el "GPRMC" inicial).
+    Formato estándar NMEA-0183:
+      hhmmss.sss,status,lat,N/S,lon,E/W,vel_nudos,rumbo,ddmmyy,var_mag,var_mag_dir,modo
+    Diseñado para ser uno de varios parsers posibles (ver
+    `_PARSERS_NMEA`) — si en el futuro aparece, por ejemplo, $GPGGA, se
+    agrega su propio parser sin tocar este. No se implementa ninguna otra
+    sentencia todavía por falta de evidencia real de que el Baofeng las
+    mande."""
+    if len(campos) < 9:
+        return None
+    hora_str, status, lat_str, ns, lon_str, ew, vel_str, rumbo_str, fecha_str = campos[:9]
+    if not lat_str or not lon_str or not ns or not ew:
+        return None
+    try:
+        lat_deg = int(lat_str[:2])
+        lat_min = float(lat_str[2:])
+        lon_deg = int(lon_str[:3])
+        lon_min = float(lon_str[3:])
+    except ValueError:
+        return None
+
+    lat = lat_deg + lat_min / 60
+    lon = lon_deg + lon_min / 60
+    if ns.upper() == "S":
+        lat = -lat
+    if ew.upper() == "W":
+        lon = -lon
+
+    velocidad_kmh = None
+    if vel_str:
+        try:
+            # 1 nudo = 1.852 km/h — conversión estándar, no aproximada.
+            velocidad_kmh = round(float(vel_str) * 1.852, 3)
+        except ValueError:
+            pass
+
+    rumbo = None
+    if rumbo_str:
+        try:
+            rumbo = float(rumbo_str)
+        except ValueError:
+            pass
+
+    timestamp_gps_iso = None
+    if hora_str and fecha_str and len(fecha_str) == 6:
+        try:
+            hh, mm, ss = int(hora_str[0:2]), int(hora_str[2:4]), float(hora_str[4:])
+            dd, mo, yy = int(fecha_str[0:2]), int(fecha_str[2:4]), int(fecha_str[4:6])
+            # Se arma el ISO a mano con los campos del propio NMEA — sin
+            # depender de la hora del sistema en ningún momento, es el
+            # timestamp real del fix GPS, no el de cuándo lo escuchamos.
+            timestamp_gps_iso = f"20{yy:02d}-{mo:02d}-{dd:02d}T{hh:02d}:{mm:02d}:{ss:06.3f}+00:00"
+        except ValueError:
+            pass
+
+    return {
+        "valido": status.upper() == "A",
+        "lat": round(lat, 6),
+        "lon": round(lon, 6),
+        "velocidad_kmh": velocidad_kmh,
+        "rumbo": rumbo,
+        "timestamp_gps_iso": timestamp_gps_iso,
+    }
+
+
+_PARSERS_NMEA = {"GPRMC": _parsear_gprmc}
+
+
+def _parsear_beacon_nmea(data: bytes) -> dict | None:
+    """Busca una sentencia NMEA dentro de `data` (bytes crudos ya
+    concatenados de los bloques de continuación) y la parsea. Devuelve
+    None si no hay ninguna sentencia NMEA reconocible en absoluto (no es
+    este mecanismo) — pero si hay una sentencia con un tipo sin parser
+    todavía, o con checksum inválido, NO se descarta silenciosamente: se
+    devuelve igual con `completo=False`/`crc_error=True` según
+    corresponda, mismo criterio que el resto del módulo."""
+    m = NMEA_SENTENCE_RE.search(data)
+    if m is None:
+        return None
+
+    tipo = m.group(1).decode("ascii", errors="replace")
+    cuerpo = m.group(2).decode("ascii", errors="replace")
+    checksum_declarado_hex = m.group(3).decode("ascii")
+    checksum_ok = _checksum_nmea(f"{tipo},{cuerpo}") == int(checksum_declarado_hex, 16)
+    texto_crudo = f"${tipo},{cuerpo}*{checksum_declarado_hex}"
+
+    base = {
+        "lat": None, "lon": None, "velocidad_kmh": None, "rumbo": None,
+        "timestamp_gps_iso": None, "campos": {"tipo_nmea": tipo, "cuerpo": cuerpo},
+        "texto_crudo": texto_crudo, "completo": False, "crc_error": not checksum_ok,
+    }
+
+    parser = _PARSERS_NMEA.get(tipo)
+    if parser is None:
+        return base  # sentencia NMEA real, pero de un tipo sin parser (ver docstring)
+
+    resultado = parser(cuerpo.split(","))
+    if resultado is None:
+        return base
+
+    base.update(resultado)
+    base["completo"] = resultado.pop("valido") and resultado["lat"] is not None and resultado["lon"] is not None
+    return base
+
+
+def extraer_beacons_nmea(texto: str) -> list[dict]:
+    """Recorre el texto crudo de UN bloque buscando secciones "Slot 1
+    Data Header - Indiv - Unconfirmed Delivery" con "SAP 03 [UDP Comp]"
+    (la firma del beacon GPS automático, distinta de "SAP 04 [IP Based]"
+    + "Confirmed Delivery" que usan (a)/(b)/(c)) y arma la sentencia NMEA
+    con los bloques de continuación — consolidados por dsd-fme o no, da
+    igual: se buscan los bytes crudos directamente, no se depende del
+    resumen "Multi Block PDU Message" en absoluto para este mecanismo."""
+    lineas = [strip_ansi(l) for l in texto.splitlines()]
+    hallazgos = []
+    i = 0
+    while i < len(lineas):
+        m = DATA_HEADER_NMEA_RE.search(lineas[i])
+        if not m:
+            i += 1
+            continue
+
+        radio_id, radio_id_contacto = m.group(1), m.group(2)
+        es_sap03 = i + 1 < len(lineas) and bool(SAP03_RE.search(lineas[i + 1]))
+        bloques_totales = None
+        if i + 1 < len(lineas):
+            mb = BLOCKS_RE.search(lineas[i + 1])
+            if mb:
+                bloques_totales = int(mb.group(1))
+
+        bloques, _consolidado, j = _recolectar_bloques_de_seccion(lineas, i)
+        i = j
+
+        if not es_sap03 or not bloques:
+            continue
+
+        crudo = b"".join(bloques)
+        hallazgo = _parsear_beacon_nmea(crudo)
+        if hallazgo is None:
+            continue  # no había ninguna sentencia NMEA reconocible acá
+
+        hallazgo.update({
+            "mecanismo": "nmea_beacon",
+            "radio_id": radio_id,
+            "radio_id_contacto": radio_id_contacto,
+            "reconstruido_cruzando_bloques": False,
+            "bloques_totales": bloques_totales,
+            "bloques_capturados": len(bloques),
+        })
+        hallazgos.append(hallazgo)
 
     return hallazgos
 
@@ -477,7 +681,9 @@ class DetectorMensajesDMR:
     decodifica en bloques distintos, y (2) evitar reportar el mismo
     mensaje lógico dos veces si lo vieron mecanismos distintos (ej. un
     mensaje capturado consolidado Y también reconstruido a mano, o el
-    mismo contenido visto por rebote ICMP y por UDP directo)."""
+    mismo contenido visto por rebote ICMP y por UDP directo). Para el
+    mecanismo (d) nmea_beacon, la dedup usa el timestamp embebido en el
+    propio NMEA en vez de lat/lon — ver `_clave_dedup`."""
 
     def __init__(self):
         self._pendientes: dict[tuple[int, str], _Candidato] = {}
@@ -486,6 +692,15 @@ class DetectorMensajesDMR:
 
     def _clave_dedup(self, hallazgo: dict) -> str:
         base = f"{hallazgo['radio_id']}|{hallazgo['radio_id_contacto']}|"
+        if hallazgo.get("timestamp_gps_iso"):
+            # Beacon periódico (nmea_beacon): cada fix trae su propia hora
+            # real. NO alcanza con Source+Target+ventana de bloque para
+            # dedup acá — un beacon nuevo cada ~30s es un evento legítimo
+            # y distinto, no un duplicado del anterior, aunque comparta
+            # radio_id/contacto y hasta lat/lon casi iguales. Solo se
+            # considera duplicado si es EXACTAMENTE el mismo timestamp de
+            # GPS (mismo fix visto dos veces, ej. reprocesado).
+            return base + hallazgo["timestamp_gps_iso"]
         if hallazgo["completo"]:
             return base + f"{hallazgo['lat']},{hallazgo['lon']}"
         return base + re.sub(r"\s+", "", hallazgo["texto_crudo"])[:64]
@@ -520,6 +735,7 @@ class DetectorMensajesDMR:
                 resultados.append(hallazgo)
 
         resultados.extend(reconstruir_fragmentos_sueltos(texto))
+        resultados.extend(extraer_beacons_nmea(texto))
 
         # Etapa 4: dedup — solo tiene sentido marcarlo en hallazgos con
         # contenido real (coordenada completa, o campos no vacíos); los

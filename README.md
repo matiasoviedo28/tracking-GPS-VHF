@@ -12,20 +12,34 @@ en tiempo real qué equipos están activos, con qué transmitieron, y una bitác
 audio reproducible de cada transmisión.
 
 **Estado del GPS de posición:** el objetivo original del proyecto era reemplazar
-también la localización GPS que ofrecía TRBOnet. A la fecha, tras numerosas
-sesiones de investigación documentadas en
-[`sdr-decoder/INVESTIGACION_LRRP.md`](./sdr-decoder/INVESTIGACION_LRRP.md), **no
-se logró capturar un reporte de posición (LRRP) real** de ningún equipo. La
-evidencia acumulada apunta a que el protocolo de posición requiere una solicitud
-activa desde una aplicación de red autenticada contra la repetidora — camino
-bloqueado hoy por la autenticación TLS-PSK del equipo. El mapa interactivo existe
-en el frontend y está listo para mostrar posiciones en cuanto ese bloqueo se
-resuelva, pero hoy no recibe datos reales.
+también la localización GPS que ofrecía TRBOnet. Hay dos caminos distintos, con
+resultados muy distintos:
+
+- **LRRP (protocolo nativo Motorola)**: tras numerosas sesiones de investigación
+  documentadas en
+  [`sdr-decoder/INVESTIGACION_LRRP.md`](./sdr-decoder/INVESTIGACION_LRRP.md), **no
+  se logró capturar un reporte de posición (LRRP) real** de ningún equipo Motorola.
+  La evidencia acumulada apunta a que el protocolo requiere una solicitud activa
+  desde una aplicación de red autenticada contra la repetidora — camino bloqueado
+  hoy por la autenticación TLS-PSK del equipo. Sigue sin resolverse.
+- **APRS/NMEA (equipos compatibles, confirmado con un Baofeng UV-32)**: **sí
+  funciona, de punta a punta, en producción.** Estos equipos pueden mandar su
+  posición sola, de forma automática y periódica (cada ~30s), como una sentencia
+  NMEA estándar (`$GPRMC`) — el sistema la detecta, la persiste, y la muestra en
+  el mapa en tiempo real, sin ninguna limitación de TLS-PSK de por medio (no
+  depende de la repetidora en absoluto). Validado con QA en vivo: ~82% de tasa de
+  éxito de captura, posición actualizándose sola en el mapa cada ~30s. Detalle
+  completo en `INVESTIGACION_LRRP.md`, sección "🎯 HITO — Primer flujo de GPS
+  automático y periódico funcionando de punta a punta".
 
 ## Funcionalidades implementadas
 
 - **Presencia de equipos en tiempo real**: qué radio transmitió, cuándo, y qué
-  tipo de evento (voz, emergencia, registro automático ARS).
+  tipo de evento (voz, emergencia, registro automático ARS, beacon APRS).
+- **Posición GPS en tiempo real (APRS/NMEA)**: para equipos compatibles (ej.
+  Baofeng UV-32), la posición que mandan solos y de forma periódica se detecta,
+  persiste y muestra en el mapa automáticamente — ver "Estado del GPS de
+  posición" más arriba.
 - **Bitácora de audio**: cada transmisión de voz queda grabada y disponible para
   reproducir desde el panel, con reproducción exclusiva, modo secuencial y modo
   "escuchar en vivo".
@@ -59,13 +73,21 @@ resuelva, pero hoy no recibe datos reales.
 datos GPS reales. No proviene de una captura LRRP real (ver "Estado del GPS
 de posición" más arriba) y no representa una posición real de ningún equipo.*
 
+**Posición GPS real, automática, de un equipo compatible con APRS (Baofeng UV-32)**
+
+![GPS automático APRS](./docs/images/gps_aprs_baofeng.png)
+
+*A diferencia de la captura anterior, esto NO es una demo cargada a mano: es
+una posición real, recibida sola cada ~30s vía el beacon APRS/NMEA del equipo,
+mostrada en el panel como "GPS automático (APRS)".*
+
 ## Componentes
 
 El proyecto está dividido en cuatro servicios, orquestados con Docker Compose:
 
 | Servicio | Función |
 |---|---|
-| `sdr-decoder` | Captura la señal DMR vía SDR, decodifica presencia/voz/audio (y, a futuro, LRRP), y envía todo al backend. Corre 100% en contenedor, sin pasos manuales. |
+| `sdr-decoder` | Captura la señal DMR vía SDR, decodifica presencia/voz/audio y posición GPS de equipos compatibles APRS/NMEA (funcionando; LRRP de Motorola sigue pendiente/bloqueado), y envía todo al backend. Corre 100% en contenedor, sin pasos manuales. |
 | `backend` | Expone la API que recibe los eventos, los persiste, y sirve los datos al frontend en tiempo real vía WebSocket. |
 | `database` | PostgreSQL, persistencia de equipos, eventos y audio. |
 | `frontend` | Interfaz web con mapa, panel de equipos, bitácora de audio y estado del SDR. |
