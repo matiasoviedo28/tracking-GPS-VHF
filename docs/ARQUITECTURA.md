@@ -177,6 +177,51 @@ versión.
   - Acceso al histórico de recorrido (línea de tiempo/timelapse)
 - **Actualización:** en tiempo real vía WebSocket, sin necesidad de recargar la
   página.
+- **Trazabilidad histórica en el mapa:** consume
+  `GET /api/equipos/{equipo_id}/posiciones` (ver `docs/API.md`) para dibujar
+  el recorrido pasado de un equipo, sin depender del WebSocket (que solo emite
+  eventos nuevos a partir de la conexión).
+  - **Disparo:** click en un equipo del panel "Equipos". Si ese equipo no
+    tiene trazado dibujado, abre un modal de filtros de rango de fechas
+    (atajos: última hora / últimas 24hs / última semana / último mes /
+    personalizado, más un botón "Limpiar filtros" que vuelve al default de
+    24hs). El botón **X** del modal es lo que efectivamente cierra el panel
+    **y** dispara el fetch + dibujo — no hay otro punto de cierre. Si el
+    equipo ya tiene un trazado activo, el click lo saca del mapa (toggle) sin
+    volver a abrir el modal. El mapa (zoom/pan/marcadores de última posición)
+    sigue operativo con el modal abierto — no se bloquea nada.
+  - **Múltiples trazados simultáneos:** varios equipos pueden tener trazado
+    dibujado a la vez. Cada uno se identifica con un color fijo propio,
+    asignado por `equipo_id % length` sobre una paleta de 10 colores
+    distinguibles entre sí y con buen contraste sobre ambas capas base
+    (calle/satélite) — ver `PALETA_TRAZADOS` en `frontend/app.js`. El panel de
+    Equipos muestra un swatch de ese color junto a cada equipo con trazado
+    activo.
+  - **Modos de color del trazado** (selector visible solo con ≥1 trazado
+    activo, en el panel flotante "Trazados"):
+    - *Por equipo* (default): color fijo, como se describe arriba.
+    - *Por velocidad*: cada segmento del trazado se colorea con un gradiente
+      (celeste = lento, rojo = rápido) según la velocidad real registrada en
+      ese tramo, con una leyenda (barra + valores min/max reales de la serie)
+      en el panel. Solo puede activarse con **exactamente un** equipo
+      trazado — con 2+, el selector se deshabilita automáticamente y se
+      fuerza color fijo por equipo, con una nota visible explicando por qué
+      (no solo un control grisado sin contexto). Si el único equipo activo no
+      tiene datos de velocidad en el rango, también cae a color fijo con su
+      propia nota.
+  - **Muestreo de rangos grandes:** delegado enteramente al backend (ver
+    `docs/API.md`) — el frontend no decide cuántos puntos pedir, solo
+    interpreta la metadata (`muestreado`, `total_real`) que viene en la
+    respuesta. Cuando `muestreado=true`, se muestra un aviso persistente por
+    equipo ("Mostrando datos limitados (X de Y puntos)") en el panel
+    "Trazados", mientras ese trazado esté activo.
+  - **Sin datos en el rango elegido:** si la respuesta viene con `posiciones`
+    vacío, se muestra un toast simple ("Sin datos de posición en este rango")
+    y no se dibuja nada — no se abre ningún trazado ni se agrega el equipo a
+    la lista de trazados activos.
+  - **Inicio/fin del recorrido:** cada trazado dibuja un marcador circular
+    distinto en el primer y el último punto del rango (verde para inicio,
+    rojo para fin), independientemente del modo de color elegido.
 
 ---
 

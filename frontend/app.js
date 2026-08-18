@@ -513,6 +513,371 @@ function restaurarSwitch(elementId, storageKey) {
   });
 }
 
+// ---- Trazabilidad histórica (trazados) ----
+// Ver docs/API.md, GET /api/equipos/{equipo_id}/posiciones, y ARQUITECTURA.md
+// sección 6. Decisiones de alcance ya tomadas (no reabrir):
+//   - Click en equipo sin trazado -> abre el modal de filtros.
+//   - Click en equipo con trazado -> lo saca del mapa (toggle), sin reabrir
+//     el modal.
+//   - Varios equipos pueden estar trazados a la vez, cada uno con color fijo
+//     propio; el modo "por velocidad" solo se habilita con exactamente 1
+//     trazado activo (con 2+, se fuerza color fijo por equipo).
+
+const API_HISTORICO_URL = (equipoId) => `${API_EQUIPOS_URL}/${equipoId}/posiciones`;
+
+// Paleta de colores fija por equipo (10 tonos distintos y legibles, con
+// buen contraste tanto sobre el mapa de calles como el satelital) — se
+// asigna por equipo_id % length, así que es estable entre sesiones para el
+// mismo equipo mientras no cambie de id.
+const PALETA_TRAZADOS = [
+  "#e6194b", // rojo
+  "#3cb44b", // verde
+  "#4363d8", // azul
+  "#f58231", // naranja
+  "#911eb4", // violeta
+  "#42d4d4", // cian
+  "#f032e6", // magenta
+  "#9a6324", // marrón
+  "#000075", // azul marino
+  "#808000", // oliva
+];
+
+function colorPorEquipo(equipoId) {
+  return PALETA_TRAZADOS[equipoId % PALETA_TRAZADOS.length];
+}
+
+// Gradiente del modo "por velocidad" — celeste (lento) a rojo (rápido).
+// Coincide a mano con el gradiente CSS de .trazado-leyenda-barra en
+// style.css (no hay una única fuente de verdad entre CSS e íconos Leaflet,
+// así que si se cambia acá hay que cambiar también ahí).
+const COLOR_VELOCIDAD_MIN = "#46c9f0";
+const COLOR_VELOCIDAD_MAX = "#e6194b";
+
+function hexARgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function interpolarColor(colorMin, colorMax, t) {
+  const c1 = hexARgb(colorMin);
+  const c2 = hexARgb(colorMax);
+  const r = Math.round(c1.r + (c2.r - c1.r) * t);
+  const g = Math.round(c1.g + (c2.g - c1.g) * t);
+  const b = Math.round(c1.b + (c2.b - c1.b) * t);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+// equipo_id -> respuesta cruda del backend (posiciones + metadata). Su sola
+// presencia en este Map es lo que define "este equipo tiene trazado activo"
+// — se guarda el crudo (no solo el layer) para poder redibujar en otro modo
+// de color sin volver a pedirle nada al backend.
+const trazadosDatos = new Map();
+// equipo_id -> L.LayerGroup ya agregado al mapa (se recrea entero en cada
+// redibujo — más simple que mutar polylines existentes, y el volumen de
+// puntos por trazado es chico, ver max_puntos en el backend).
+const trazadosCapas = new Map();
+// equipo_id -> { mostrados, total } — persiste mientras el trazado esté
+// activo, para el aviso "Mostrando datos limitados (X de Y puntos)".
+const avisosMuestreo = new Map();
+
+let modoColorTrazado = "equipo"; // "equipo" | "velocidad"
+let filtroEquipoActivo = null; // equipo_id para el que está abierto el modal de filtros
+
+function puedeUsarModoVelocidad(datos) {
+  return (
+    datos != null &&
+    datos.velocidad_min != null &&
+    datos.velocidad_max != null &&
+    datos.velocidad_max > datos.velocidad_min
+  );
+}
+
+function mostrarToast(mensaje) {
+  const el = document.createElement("div");
+  el.className = "toast-trazado";
+  el.textContent = mensaje;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("toast-trazado--visible"));
+  setTimeout(() => {
+    el.classList.remove("toast-trazado--visible");
+    setTimeout(() => el.remove(), 250);
+  }, 3800);
+}
+
+function limpiarCapaTrazado(equipoId) {
+  const capa = trazadosCapas.get(equipoId);
+  if (capa) {
+    map.removeLayer(capa);
+    trazadosCapas.delete(equipoId);
+  }
+}
+
+// Redibuja un único trazado a partir de los datos ya cacheados en
+// trazadosDatos — no pega al backend. El modo velocidad solo se aplica
+// realmente si hay exactamente un trazado activo Y ese trazado tiene rango
+// de velocidad utilizable; si no, cae a color fijo por equipo sin romper
+// nada (chequeo local, no depende de que actualizarSelectorModo haya
+// corrido antes).
+function redibujarTrazado(equipoId) {
+  limpiarCapaTrazado(equipoId);
+  const datos = trazadosDatos.get(equipoId);
+  if (!datos || !datos.posiciones || datos.posiciones.length === 0) return;
+
+  const puntos = datos.posiciones;
+  const capa = L.layerGroup();
+  const usaVelocidad =
+    modoColorTrazado === "velocidad" &&
+    trazadosDatos.size === 1 &&
+    puedeUsarModoVelocidad(datos);
+
+  if (usaVelocidad && puntos.length > 1) {
+    for (let i = 0; i < puntos.length - 1; i++) {
+      const a = puntos[i];
+      const b = puntos[i + 1];
+      const vel = a.velocidad != null ? a.velocidad : b.velocidad;
+      const t =
+        vel == null
+          ? 0.5
+          : (vel - datos.velocidad_min) / (datos.velocidad_max - datos.velocidad_min);
+      const color = interpolarColor(COLOR_VELOCIDAD_MIN, COLOR_VELOCIDAD_MAX, Math.min(1, Math.max(0, t)));
+      L.polyline(
+        [[a.lat, a.lon], [b.lat, b.lon]],
+        { color, weight: 4, opacity: 0.9 }
+      ).addTo(capa);
+    }
+  } else {
+    const color = colorPorEquipo(equipoId);
+    L.polyline(puntos.map((p) => [p.lat, p.lon]), { color, weight: 4, opacity: 0.85 }).addTo(capa);
+  }
+
+  const inicio = puntos[0];
+  const fin = puntos[puntos.length - 1];
+  L.circleMarker([inicio.lat, inicio.lon], {
+    radius: 7,
+    color: "#1b5e20",
+    weight: 2,
+    fillColor: "#66bb6a",
+    fillOpacity: 1,
+  })
+    .bindTooltip("Inicio del rango")
+    .addTo(capa);
+  L.circleMarker([fin.lat, fin.lon], {
+    radius: 7,
+    color: "#7a1414",
+    weight: 2,
+    fillColor: "#e53935",
+    fillOpacity: 1,
+  })
+    .bindTooltip("Fin del rango")
+    .addTo(capa);
+
+  capa.addTo(map);
+  trazadosCapas.set(equipoId, capa);
+}
+
+function redibujarTodosLosTrazados() {
+  for (const equipoId of trazadosDatos.keys()) {
+    redibujarTrazado(equipoId);
+  }
+}
+
+// Sincroniza el panel "Trazados" (visibilidad, selector de modo habilitado/
+// deshabilitado, leyenda de velocidad, avisos) con el estado actual, y
+// redibuja todos los trazados según corresponda. Es el único punto que
+// decide si el modo velocidad puede seguir activo — se llama después de
+// cualquier cambio (nuevo trazado, trazado quitado, click en el selector).
+function actualizarSelectorModo() {
+  const panel = document.getElementById("panel-trazados");
+  const activos = trazadosDatos.size;
+  if (panel) panel.hidden = activos === 0;
+
+  const multiplesActivos = activos >= 2;
+  if (multiplesActivos && modoColorTrazado === "velocidad") {
+    // Con 2+ equipos trazados, el modo velocidad no aplica (¿de cuál
+    // equipo sería la leyenda?) — se fuerza color fijo por equipo.
+    modoColorTrazado = "equipo";
+  }
+
+  const btnVelocidad = document.querySelector('.modo-btn[data-modo="velocidad"]');
+  if (btnVelocidad) btnVelocidad.disabled = multiplesActivos;
+
+  document.querySelectorAll(".modo-btn").forEach((btn) => {
+    btn.classList.toggle("modo-btn--activo", btn.dataset.modo === modoColorTrazado);
+  });
+
+  const datosUnico = activos === 1 ? trazadosDatos.values().next().value : null;
+  const nota = document.getElementById("trazados-modo-nota");
+  if (nota) {
+    if (multiplesActivos) {
+      nota.hidden = false;
+      nota.textContent = "Modo \"por velocidad\" deshabilitado: solo puede usarse con un único equipo trazado a la vez.";
+    } else if (activos === 1 && modoColorTrazado === "velocidad" && !puedeUsarModoVelocidad(datosUnico)) {
+      nota.hidden = false;
+      nota.textContent = "Este equipo no tiene datos de velocidad en el rango — se usa color fijo por equipo.";
+    } else {
+      nota.hidden = true;
+    }
+  }
+
+  const leyenda = document.getElementById("trazados-leyenda-velocidad");
+  if (leyenda) {
+    const mostrarLeyenda = activos === 1 && modoColorTrazado === "velocidad" && puedeUsarModoVelocidad(datosUnico);
+    leyenda.hidden = !mostrarLeyenda;
+    if (mostrarLeyenda) {
+      document.getElementById("leyenda-vel-min").textContent = `${datosUnico.velocidad_min.toFixed(1)} km/h`;
+      document.getElementById("leyenda-vel-max").textContent = `${datosUnico.velocidad_max.toFixed(1)} km/h`;
+    }
+  }
+
+  redibujarTodosLosTrazados();
+}
+
+function renderAvisosTrazado() {
+  const lista = document.getElementById("trazados-avisos");
+  if (!lista) return;
+  lista.innerHTML = Array.from(avisosMuestreo.entries())
+    .map(([equipoId, info]) => {
+      const alias = (equiposEstado.get(equipoId) || {}).alias || `equipo ${equipoId}`;
+      return `<li class="trazado-aviso-item">⚠ ${alias}: mostrando datos limitados (${info.mostrados} de ${info.total} puntos)</li>`;
+    })
+    .join("");
+}
+
+function quitarTrazado(equipoId) {
+  limpiarCapaTrazado(equipoId);
+  trazadosDatos.delete(equipoId);
+  avisosMuestreo.delete(equipoId);
+  renderAvisosTrazado();
+  renderPanelEquipos(); // refresca el swatch de color del equipo en la lista
+  actualizarSelectorModo();
+}
+
+function dibujarTrazado(equipoId, datos) {
+  trazadosDatos.set(equipoId, datos);
+
+  if (datos.muestreado) {
+    avisosMuestreo.set(equipoId, { mostrados: datos.posiciones.length, total: datos.total_real });
+  } else {
+    avisosMuestreo.delete(equipoId);
+  }
+  renderAvisosTrazado();
+
+  renderPanelEquipos();
+  actualizarSelectorModo();
+}
+
+async function cargarYDibujarTrazado(equipoId, desdeIso, hastaIso) {
+  const url = `${API_HISTORICO_URL(equipoId)}?desde=${encodeURIComponent(desdeIso)}&hasta=${encodeURIComponent(hastaIso)}`;
+  let datos;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const detalle = resp.status === 400 ? " (rango de fechas inválido)" : "";
+      throw new Error(`GET posiciones -> ${resp.status}${detalle}`);
+    }
+    datos = await resp.json();
+  } catch (err) {
+    console.error("No se pudo cargar el histórico de posiciones:", err);
+    mostrarToast("No se pudo cargar el histórico de posiciones. Reintentá más tarde.");
+    return;
+  }
+
+  if (!datos.posiciones || datos.posiciones.length === 0) {
+    mostrarToast("Sin datos de posición en este rango");
+    return;
+  }
+
+  dibujarTrazado(equipoId, datos);
+}
+
+document.getElementById("trazados-modo-selector").addEventListener("click", (event) => {
+  const btn = event.target.closest(".modo-btn");
+  if (!btn || btn.disabled) return;
+  modoColorTrazado = btn.dataset.modo;
+  actualizarSelectorModo();
+});
+
+// ---- Modal de filtros de rango de fechas ----
+
+const RANGO_ATAJO_DEFAULT = "24h";
+
+function calcularRangoAtajo(atajo) {
+  const hasta = new Date();
+  const MS_HORA = 60 * 60 * 1000;
+  switch (atajo) {
+    case "1h":
+      return { desde: new Date(hasta.getTime() - MS_HORA), hasta };
+    case "24h":
+      return { desde: new Date(hasta.getTime() - 24 * MS_HORA), hasta };
+    case "7d":
+      return { desde: new Date(hasta.getTime() - 7 * 24 * MS_HORA), hasta };
+    case "30d":
+      return { desde: new Date(hasta.getTime() - 30 * 24 * MS_HORA), hasta };
+    default:
+      return null; // "personalizado": no se tocan los inputs
+  }
+}
+
+function formatearParaInputLocal(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function marcarAtajoActivo(atajo) {
+  document.querySelectorAll(".atajo-btn").forEach((btn) => {
+    btn.classList.toggle("atajo-btn--activo", btn.dataset.atajo === atajo);
+  });
+}
+
+function aplicarAtajo(atajo) {
+  marcarAtajoActivo(atajo);
+  const rango = calcularRangoAtajo(atajo);
+  if (!rango) return; // "personalizado": el usuario edita los campos a mano
+  document.getElementById("filtro-desde").value = formatearParaInputLocal(rango.desde);
+  document.getElementById("filtro-hasta").value = formatearParaInputLocal(rango.hasta);
+}
+
+function abrirFiltroTrazado(equipoId) {
+  filtroEquipoActivo = equipoId;
+  const estado = equiposEstado.get(equipoId) || {};
+  document.getElementById("filtro-trazado-titulo").textContent = `Trazado histórico — ${estado.alias || `equipo ${equipoId}`}`;
+  aplicarAtajo(RANGO_ATAJO_DEFAULT);
+  document.getElementById("modal-filtro-trazado").hidden = false;
+}
+
+async function cerrarFiltroTrazadoYDibujar() {
+  const equipoId = filtroEquipoActivo;
+  document.getElementById("modal-filtro-trazado").hidden = true;
+  filtroEquipoActivo = null;
+  if (equipoId == null) return;
+
+  const desdeVal = document.getElementById("filtro-desde").value;
+  const hastaVal = document.getElementById("filtro-hasta").value;
+  if (!desdeVal || !hastaVal) return; // rango incompleto: no hay nada para pedir al backend
+
+  const desde = new Date(desdeVal);
+  const hasta = new Date(hastaVal);
+  if (desde > hasta) {
+    mostrarToast("El rango de fechas es inválido: 'desde' es posterior a 'hasta'.");
+    return;
+  }
+
+  await cargarYDibujarTrazado(equipoId, desde.toISOString(), hasta.toISOString());
+}
+
+document.querySelector(".filtro-atajos").addEventListener("click", (event) => {
+  const btn = event.target.closest(".atajo-btn");
+  if (!btn) return;
+  aplicarAtajo(btn.dataset.atajo);
+});
+
+["filtro-desde", "filtro-hasta"].forEach((id) => {
+  document.getElementById(id).addEventListener("input", () => marcarAtajoActivo("personalizado"));
+});
+
+document.getElementById("filtro-limpiar").addEventListener("click", () => aplicarAtajo(RANGO_ATAJO_DEFAULT));
+document.getElementById("filtro-trazado-cerrar").addEventListener("click", cerrarFiltroTrazadoYDibujar);
+
 // ---- Panel de equipos (presencia) ----
 
 const equiposEstado = new Map(); // equipo_id -> { alias, radio_id, tipo, ultimo_visto: Date|null, ultimo_evento }
@@ -561,19 +926,39 @@ function renderPanelEquipos() {
     .map((equipo) => {
       const online = esOnline(equipo.ultimo_visto);
       const evento = equipo.ultimo_evento ? NOMBRES_EVENTO[equipo.ultimo_evento] || equipo.ultimo_evento : null;
+      // Trazabilidad histórica (ver sección "Trazados" más arriba): un
+      // equipo con trazado activo muestra un swatch con su color fijo, y el
+      // click sobre el <li> lo quita en vez de reabrir el modal de filtros.
+      const tieneTrazado = trazadosDatos.has(equipo.id);
+      const swatch = tieneTrazado
+        ? `<span class="equipo-trazado-swatch" style="background:${colorPorEquipo(equipo.id)}"></span>`
+        : "";
+      const tituloClick = tieneTrazado ? "Click para quitar el trazado del mapa" : "Click para ver el trazado histórico";
       return `
-        <li class="equipo-item">
+        <li class="equipo-item${tieneTrazado ? " equipo-item--trazado" : ""}" data-equipo-id="${equipo.id}" title="${tituloClick}">
           <span class="equipo-dot ${online ? "equipo-dot--online" : ""}"></span>
           <span class="equipo-info">
             <div class="equipo-alias">${equipo.alias}</div>
             <div class="equipo-radio-id">${equipo.radio_id || "—"}</div>
             <div class="equipo-detalle">${tiempoRelativo(equipo.ultimo_visto)}${evento ? ` · ${evento}` : ""}</div>
           </span>
+          ${swatch}
         </li>
       `;
     })
     .join("");
 }
+
+document.getElementById("lista-equipos").addEventListener("click", (event) => {
+  const li = event.target.closest(".equipo-item");
+  if (!li || !li.dataset.equipoId) return;
+  const equipoId = Number(li.dataset.equipoId);
+  if (trazadosDatos.has(equipoId)) {
+    quitarTrazado(equipoId);
+  } else {
+    abrirFiltroTrazado(equipoId);
+  }
+});
 
 async function cargarEquiposIniciales() {
   try {

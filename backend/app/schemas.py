@@ -144,3 +144,28 @@ class SdrStatusOut(BaseModel):
     status: EstadoSdr
     timestamp: datetime
     detalle: str | None = None
+
+
+# Histórico de posiciones para trazabilidad en el mapa (ver
+# GET /api/equipos/{equipo_id}/posiciones en docs/API.md). Solo los campos
+# que el frontend necesita para dibujar el trazado — no expone altitud/rumbo,
+# que ya se ven en el popup de la última posición.
+class PosicionHistorico(BaseModel):
+    lat: float
+    lon: float
+    timestamp: datetime
+    velocidad: float | None = None
+
+
+class HistoricoPosicionesOut(BaseModel):
+    equipo_id: int
+    radio_id: str | None = None
+    posiciones: list[PosicionHistorico]
+    # Cantidad real de filas en el rango, antes de muestrear — permite al
+    # frontend mostrar "mostrando X de Y puntos" cuando muestreado=True.
+    total_real: int
+    muestreado: bool
+    # Min/max de velocidad de la serie DEVUELTA (ya muestreada, si aplica) —
+    # es lo que necesita la leyenda del modo "por velocidad" del frontend.
+    velocidad_min: float | None = None
+    velocidad_max: float | None = None

@@ -78,6 +78,63 @@
     <button type="button" class="capa-btn" data-capa="satelite" title="Vista satelital (Esri)">🛰️ Satélite</button>
   </div>
 
+  <!-- Control de trazados históricos (ver app.js, sección "Trazabilidad
+       histórica"): selector de modo de color + leyenda de velocidad +
+       avisos de muestreo. Oculto mientras no haya ningún trazado activo. -->
+  <div id="panel-trazados" class="panel panel-trazados" hidden>
+    <div class="panel-header">
+      <h2>Trazados</h2>
+    </div>
+    <div class="panel-body">
+      <div id="trazados-modo-selector" class="trazado-modo-selector">
+        <button type="button" class="modo-btn modo-btn--activo" data-modo="equipo">Por equipo</button>
+        <button type="button" class="modo-btn" data-modo="velocidad">Por velocidad</button>
+      </div>
+      <div id="trazados-modo-nota" class="trazado-modo-nota" hidden></div>
+      <div id="trazados-leyenda-velocidad" class="trazado-leyenda" hidden>
+        <div class="trazado-leyenda-titulo">Velocidad</div>
+        <div class="trazado-leyenda-barra"></div>
+        <div class="trazado-leyenda-valores">
+          <span id="leyenda-vel-min">—</span>
+          <span id="leyenda-vel-max">—</span>
+        </div>
+      </div>
+      <ul id="trazados-avisos" class="trazados-avisos"></ul>
+    </div>
+  </div>
+
+  <!-- Panel de filtros de rango de fechas para el trazado histórico (ver
+       app.js): se abre al hacer click en un equipo del panel de Equipos que
+       todavía no tiene trazado dibujado. -->
+  <div id="modal-filtro-trazado" class="modal-overlay" hidden>
+    <div class="modal-filtro-trazado">
+      <div class="modal-filtro-header">
+        <h3 id="filtro-trazado-titulo">Trazado histórico</h3>
+        <button type="button" id="filtro-trazado-cerrar" class="modal-cerrar-btn" title="Cerrar y dibujar el trazado">✕</button>
+      </div>
+      <div class="modal-filtro-body">
+        <div class="filtro-atajos">
+          <button type="button" class="atajo-btn" data-atajo="1h">Última hora</button>
+          <button type="button" class="atajo-btn atajo-btn--activo" data-atajo="24h">Últimas 24hs</button>
+          <button type="button" class="atajo-btn" data-atajo="7d">Última semana</button>
+          <button type="button" class="atajo-btn" data-atajo="30d">Último mes</button>
+          <button type="button" class="atajo-btn" data-atajo="personalizado">Personalizado</button>
+        </div>
+        <div class="filtro-fechas">
+          <label class="filtro-fecha-label">
+            Desde
+            <input type="datetime-local" id="filtro-desde" />
+          </label>
+          <label class="filtro-fecha-label">
+            Hasta
+            <input type="datetime-local" id="filtro-hasta" />
+          </label>
+        </div>
+        <button type="button" id="filtro-limpiar" class="filtro-limpiar-btn">Limpiar filtros</button>
+      </div>
+    </div>
+  </div>
+
   <script
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="

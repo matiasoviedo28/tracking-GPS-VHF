@@ -341,6 +341,108 @@ lista permitida.
 
 ---
 
+## GET /api/equipos/{equipo_id}/posiciones
+
+Devuelve el histórico de posiciones de un equipo en un rango de fechas —
+habilita la trazabilidad histórica en el mapa del frontend (ver
+ARQUITECTURA.md sección 6). Reemplaza, para esta funcionalidad, lo que la
+sección de `WS /ws/telemetry` de este documento marcaba como "fuera del
+alcance de esta versión".
+
+**Nota sobre `equipo_id`**: el path usa el `id` numérico (PK, el mismo que
+`GET /api/equipos` devuelve como `id`), no `radio_id` — un equipo puede
+conocerse solo por `radio_ip` y no tener `radio_id` (ver nota¹ de
+`POST /api/telemetry` más arriba), así que `radio_id` no sirve como
+identificador universal. Es el mismo criterio que ya usa
+`PATCH /api/equipos/{id}/icono`.
+
+### Request
+
+`GET /api/equipos/{equipo_id}/posiciones?desde=<ISO8601>&hasta=<ISO8601>&max_puntos=<int>`
+
+| Query param  | Tipo               | Requerido | Descripción                                                                 |
+|--------------|--------------------|-----------|------------------------------------------------------------------------------|
+| `desde`      | string (ISO 8601)  | sí        | Inicio del rango (inclusive).                                                |
+| `hasta`      | string (ISO 8601)  | sí        | Fin del rango (inclusive).                                                    |
+| `max_puntos` | integer            | no        | Techo de puntos a devolver. Default `500`. Rango permitido: `2` a `5000`.     |
+
+#### Ejemplo de request
+
+```
+GET /api/equipos/7/posiciones?desde=2026-08-16T00:00:00-03:00&hasta=2026-08-17T00:00:00-03:00
+```
+
+### Response — éxito
+
+**`200 OK`**
+
+```json
+{
+  "equipo_id": 7,
+  "radio_id": "3021045",
+  "posiciones": [
+    {
+      "lat": -32.34456,
+      "lon": -65.01923,
+      "timestamp": "2026-08-16T14:32:07-03:00",
+      "velocidad": 18.5
+    },
+    {
+      "lat": -32.34501,
+      "lon": -65.02010,
+      "timestamp": "2026-08-16T14:37:12-03:00",
+      "velocidad": 22.1
+    }
+  ],
+  "total_real": 842,
+  "muestreado": true,
+  "velocidad_min": 0.0,
+  "velocidad_max": 46.3
+}
+```
+
+- `posiciones` viene siempre ordenada cronológicamente (ascendente).
+- `total_real` es la cantidad de filas que había en la base para ese rango
+  **antes** de muestrear — es lo que el frontend usa para el aviso "Mostrando
+  datos limitados (X de Y puntos)" (`X = len(posiciones)`, `Y = total_real`).
+- `muestreado` es `true` cuando `total_real > max_puntos`. En ese caso, el
+  muestreo es **uniforme sobre el rango temporal completo** (no toma solo los
+  primeros o últimos N) para no distorsionar la forma real del recorrido, y
+  siempre conserva el primer y el último punto del rango.
+- `velocidad_min`/`velocidad_max` se calculan sobre la serie **devuelta**
+  (ya muestreada, si aplica), ignorando posiciones sin `velocidad`. Vienen
+  `null` si ninguna posición de la serie tiene `velocidad` informada — el
+  frontend usa esto para deshabilitar el modo "por velocidad" del trazado.
+- Si no hay ninguna posición en el rango, `posiciones` es `[]`, `total_real`
+  es `0` y `muestreado` es `false` — el frontend muestra "Sin datos de
+  posición en este rango" sin dibujar nada.
+
+### Response — error
+
+**`404 Not Found`** — no existe ningún equipo con ese `equipo_id`.
+
+**`400 Bad Request`** — `desde` es posterior a `hasta`.
+
+```json
+{
+  "detail": "'desde' no puede ser posterior a 'hasta'"
+}
+```
+
+**`422 Unprocessable Entity`** — falta `desde`/`hasta`, vienen con formato
+inválido, o `max_puntos` está fuera de `2`-`5000`.
+
+### Códigos de estado
+
+| Código | Cuándo |
+|---|---|
+| `200` | Rango válido (con o sin posiciones). |
+| `400` | `desde` posterior a `hasta`. |
+| `404` | No existe un equipo con ese `equipo_id`. |
+| `422` | Query params faltantes o de tipo/rango inválido. |
+
+---
+
 ## Bitácora de audio
 
 Registra el audio decodificado de cada evento de voz (incluye emergencia), sin

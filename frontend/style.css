@@ -28,6 +28,16 @@ html, body {
   font-family: var(--fuente-sans);
 }
 
+/* Varios elementos nuevos (panel-trazados, modal-overlay) fijan su propio
+   "display" (flex) para cuando están visibles — sin esta regla, esa misma
+   clase le gana en cascada al "display: none" que el navegador aplica por
+   default al atributo [hidden] (misma especificidad, pero la hoja de
+   estilos del navegador pierde contra la del autor), y el elemento queda
+   invisible pero sigue ocupando espacio y bloqueando clicks debajo suyo. */
+[hidden] {
+  display: none !important;
+}
+
 #map {
   height: 100%;
   width: 100%;
@@ -587,6 +597,288 @@ html, body {
   background: #ffe3e1;
 }
 
+/* ---- Trazabilidad histórica (trazados) ---- */
+
+.equipo-item {
+  cursor: pointer;
+}
+
+.equipo-item:hover {
+  background: rgba(91, 155, 213, 0.12);
+}
+
+.equipo-item--trazado {
+  background: rgba(91, 155, 213, 0.08);
+}
+
+.equipo-trazado-swatch {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  margin-top: 4px;
+  border: 2px solid rgba(244, 247, 250, 0.85);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+}
+
+/* Panel flotante con el selector de modo de color + leyenda de velocidad +
+   avisos de muestreo — abajo, centrado (las cuatro esquinas ya están
+   ocupadas: audio/equipos arriba, capas abajo-derecha, zoom de Leaflet
+   abajo-izquierda). Solo visible con al menos un trazado activo. */
+.panel-trazados {
+  top: auto;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 260px;
+  max-height: 45%;
+}
+
+.trazado-modo-selector {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.modo-btn {
+  flex: 1 1 auto;
+  font-family: var(--fuente-sans);
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--azul-borde);
+  border-radius: 6px;
+  background: var(--azul-noche);
+  color: var(--texto-claro);
+  cursor: pointer;
+}
+
+.modo-btn:hover:not(:disabled) {
+  background: var(--azul-borde);
+}
+
+.modo-btn--activo {
+  background: var(--azul-cielo);
+  border-color: var(--azul-cielo);
+  color: var(--azul-noche);
+  font-weight: 600;
+}
+
+.modo-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.trazado-modo-nota {
+  font-size: 11px;
+  color: var(--ambar-pendiente);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.trazado-leyenda {
+  margin-bottom: 8px;
+}
+
+.trazado-leyenda-titulo {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(244, 247, 250, 0.7);
+  margin-bottom: 4px;
+}
+
+.trazado-leyenda-barra {
+  height: 10px;
+  border-radius: 999px;
+  /* Coincide con COLOR_VELOCIDAD_MIN/MAX de app.js — si se cambia el
+     gradiente ahí, actualizar también acá. */
+  background: linear-gradient(to right, #46c9f0, #e6194b);
+  border: 1px solid rgba(244, 247, 250, 0.3);
+}
+
+.trazado-leyenda-valores {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--fuente-mono);
+  font-size: 10px;
+  color: rgba(244, 247, 250, 0.85);
+  margin-top: 3px;
+}
+
+.trazados-avisos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.trazado-aviso-item {
+  font-size: 11px;
+  color: var(--ambar-pendiente);
+  line-height: 1.4;
+  padding: 3px 0;
+}
+
+/* ---- Modal de filtros de rango de fechas para el trazado histórico ---- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(15, 42, 74, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-filtro-trazado {
+  width: min(340px, 90vw);
+  background: var(--azul-acero);
+  border: 1px solid var(--azul-borde);
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  color: var(--texto-claro);
+  font-family: var(--fuente-sans);
+  overflow: hidden;
+}
+
+.modal-filtro-header {
+  background: var(--azul-noche);
+  border-bottom: 1px solid var(--azul-borde);
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modal-filtro-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modal-cerrar-btn {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(244, 247, 250, 0.12);
+  color: var(--texto-claro);
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-cerrar-btn:hover {
+  background: var(--azul-cielo);
+  color: var(--azul-noche);
+}
+
+.modal-filtro-body {
+  padding: 14px;
+}
+
+.filtro-atajos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.atajo-btn {
+  font-family: var(--fuente-sans);
+  font-size: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--azul-borde);
+  border-radius: 999px;
+  background: var(--azul-noche);
+  color: var(--texto-claro);
+  cursor: pointer;
+}
+
+.atajo-btn:hover {
+  background: var(--azul-borde);
+}
+
+.atajo-btn--activo {
+  background: var(--azul-cielo);
+  border-color: var(--azul-cielo);
+  color: var(--azul-noche);
+  font-weight: 600;
+}
+
+.filtro-fechas {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.filtro-fecha-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: rgba(244, 247, 250, 0.85);
+}
+
+.filtro-fecha-label input {
+  font-family: var(--fuente-mono);
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--azul-borde);
+  border-radius: 6px;
+  background: var(--azul-noche);
+  color: var(--texto-claro);
+  color-scheme: dark;
+}
+
+.filtro-limpiar-btn {
+  width: 100%;
+  font-family: var(--fuente-sans);
+  font-size: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--azul-borde);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--texto-claro);
+  cursor: pointer;
+}
+
+.filtro-limpiar-btn:hover {
+  background: rgba(244, 247, 250, 0.08);
+}
+
+/* ---- Toast simple (errores / "sin datos en este rango") ---- */
+
+.toast-trazado {
+  position: fixed;
+  bottom: 90px;
+  left: 50%;
+  transform: translateX(-50%) translateY(10px);
+  z-index: 2100;
+  background: var(--azul-noche);
+  border: 1px solid var(--azul-borde);
+  color: var(--texto-claro);
+  font-family: var(--fuente-sans);
+  font-size: 13px;
+  padding: 10px 16px;
+  border-radius: 6px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  max-width: min(320px, 80vw);
+  text-align: center;
+}
+
+.toast-trazado--visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
 /* ---- Responsive: que no se rompa en ventana angosta ---- */
 
 @media (max-width: 640px) {
@@ -651,6 +943,16 @@ html, body {
 
   .switch-label {
     display: none; /* el switch se entiende por el título del panel */
+  }
+
+  .panel-trazados {
+    width: min(80vw, 260px);
+    bottom: 8px;
+  }
+
+  .modo-btn {
+    font-size: 11px;
+    padding: 5px 6px;
   }
 }
 
